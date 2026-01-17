@@ -1531,60 +1531,50 @@ SIMILARITY_THRESHOLD=0.5
 
 ### What is GraphRAG?
 
-GraphRAG is Microsoft's advanced technique for analyzing large document collections. It automatically groups related information into "communities" and creates summaries at different levels—great for questions like *"What are the main themes across 10,000 documents?"*
+GraphRAG is Microsoft's technique for analyzing large document collections. It automatically groups related information into "communities" and creates summaries—great for questions like *"What are the main themes across 10,000 documents?"*
 
-### Why Symmetry Doesn't Use It
+### Does GraphRAG Solve Symmetry's Problem?
 
-**1. We solve different problems**
+**No.** Here's why:
 
-| GraphRAG | Symmetry |
-|----------|----------|
-| "What themes exist across all documents?" | "Continue my project in Claude" |
-| Analyzing thousands of research papers | Switching between ChatGPT and Cursor |
-| Finding patterns in support tickets | Remembering what you decided last week |
+**Symmetry's Problem:**
+> "I discussed my e-commerce project in ChatGPT yesterday. Now I want to continue in Claude without re-explaining everything."
 
-GraphRAG answers *global* questions about large document sets. Symmetry answers *specific* questions about your conversations.
+**What GraphRAG Does:**
+- Groups entities into automatic "communities" (React + Node.js + JavaScript)
+- Creates summaries of these communities
+- Answers: "What topics exist across all your data?"
 
-**2. Speed matters for us**
+**What GraphRAG Does NOT Do:**
+- ❌ Preserve the actual conversation flow (who said what, when)
+- ❌ Let you say "continue THIS specific project"
+- ❌ Keep your decisions with their reasoning intact
+- ❌ Give you control over how things are grouped
 
-- **GraphRAG**: 5-10 seconds per query (acceptable for analysis)
-- **Symmetry**: 1-2 seconds per query (needed for real-time use)
+**The Core Mismatch:**
 
-When you're switching to a new AI tool, you don't want to wait 10 seconds for context.
+| Symmetry Needs | GraphRAG Provides |
+|----------------|-------------------|
+| "Continue my e-commerce project" | "Here are themes across all your data" |
+| Full conversation history | Summarized communities |
+| User-controlled sessions | Algorithm-decided groupings |
+| Specific project context | Global patterns |
 
-**3. Cost difference**
+### What Symmetry Does Instead
 
-For 100 conversations:
-- **GraphRAG**: ~$5-15 in API costs, must rebuild entire index when adding new data
-- **Symmetry**: ~$0.50-2, new conversations added instantly
+Symmetry uses **sessions** (not communities):
+- You decide what belongs together
+- Full conversations are preserved
+- You can say "give me everything about Project X"
+- The next AI gets the actual discussion, not a summary of summaries
 
-**4. You control the organization**
+### Bottom Line
 
-GraphRAG automatically groups things using algorithms—you can't control how it organizes your data. Symmetry uses **sessions** that:
-- You can name and organize yourself
-- Auto-detect related conversations (but you confirm)
-- Match how you actually think about your projects
+GraphRAG is for: *"Analyze my 10,000 documents and tell me patterns"*
 
-**5. Conversation flow is preserved**
+Symmetry is for: *"Remember my project so I can continue it anywhere"*
 
-GraphRAG creates summaries that lose the back-and-forth of conversations. Symmetry keeps your full conversation history so the next AI knows exactly what was discussed.
-
-### Simple Summary
-
-| | Symmetry | GraphRAG |
-|--|----------|----------|
-| **Best for** | Conversation continuity | Document analysis |
-| **Speed** | Fast (1-2 sec) | Slow (5-10 sec) |
-| **Cost** | Low | High |
-| **Updates** | Instant | Rebuild required |
-| **Organization** | You control | Algorithm decides |
-
-### When Would You Use GraphRAG?
-
-- Analyzing thousands of documents for patterns
-- Finding themes across a large corpus
-- Research paper analysis
-- **NOT** for: Real-time conversation context like Symmetry does
+Different tools for different problems.
 
 ---
 
