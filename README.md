@@ -25,8 +25,7 @@ Symmetry is a memory and knowledge layer that enables seamless conversation cont
 8. [Key Techniques](#-key-techniques)
 9. [API Reference](#-api-reference)
 10. [Configuration](#-configuration)
-11. [Why Not GraphRAG?](#-why-not-graphrag)
-12. [Project Structure](#-project-structure)
+11. [Project Structure](#-project-structure)
 
 ---
 
@@ -1524,57 +1523,6 @@ CHUNK_SIZE=500
 CHUNK_OVERLAP=50
 SIMILARITY_THRESHOLD=0.5
 ```
-
----
-
-## 🤔 Why Not GraphRAG?
-
-### What is GraphRAG?
-
-GraphRAG is Microsoft's technique for analyzing large document collections. It automatically groups related information into "communities" and creates summaries—great for questions like *"What are the main themes across 10,000 documents?"*
-
-### Does GraphRAG Solve Symmetry's Problem?
-
-**No.** Here's why:
-
-**Symmetry's Problem:**
-> "I discussed my e-commerce project in ChatGPT yesterday. Now I want to continue in Claude without re-explaining everything."
-
-**What GraphRAG Does:**
-- Groups entities into automatic "communities" (React + Node.js + JavaScript)
-- Creates summaries of these communities
-- Answers: "What topics exist across all your data?"
-
-**What GraphRAG Does NOT Do:**
-- ❌ Preserve the actual conversation flow (who said what, when)
-- ❌ Let you say "continue THIS specific project"
-- ❌ Keep your decisions with their reasoning intact
-- ❌ Give you control over how things are grouped
-
-**The Core Mismatch:**
-
-| Symmetry Needs | GraphRAG Provides |
-|----------------|-------------------|
-| "Continue my e-commerce project" | "Here are themes across all your data" |
-| Full conversation history | Summarized communities |
-| User-controlled sessions | Algorithm-decided groupings |
-| Specific project context | Global patterns |
-
-### What Symmetry Does Instead
-
-Symmetry uses **sessions** (not communities):
-- You decide what belongs together
-- Full conversations are preserved
-- You can say "give me everything about Project X"
-- The next AI gets the actual discussion, not a summary of summaries
-
-### Bottom Line
-
-GraphRAG is for: *"Analyze my 10,000 documents and tell me patterns"*
-
-Symmetry is for: *"Remember my project so I can continue it anywhere"*
-
-Different tools for different problems.
 
 ---
 
