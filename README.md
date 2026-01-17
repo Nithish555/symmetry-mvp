@@ -27,7 +27,6 @@ Symmetry is a memory and knowledge layer that enables seamless conversation cont
 10. [Configuration](#-configuration)
 11. [Why Not GraphRAG?](#-why-not-graphrag)
 12. [Project Structure](#-project-structure)
-13. [Roadmap](#-roadmap)
 
 ---
 
@@ -1530,15 +1529,286 @@ SIMILARITY_THRESHOLD=0.5
 
 ## 🤔 Why Not GraphRAG?
 
+### What is GraphRAG?
+
+GraphRAG (Graph Retrieval-Augmented Generation) is Microsoft's advanced RAG technique that builds a hierarchical knowledge graph from documents:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    GRAPHRAG ARCHITECTURE                         │
+└─────────────────────────────────────────────────────────────────┘
+
+Documents
+    ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. Entity Extraction                                             │
+│    Extract ALL entities from every document                      │
+│    "React" → "PostgreSQL" → "User" → "E-commerce" → ...         │
+└─────────────────────────────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 2. Relationship Mapping                                          │
+│    Connect entities with relationships                           │
+│    (React)──USED_BY──→(E-commerce)──STORES_IN──→(PostgreSQL)    │
+└─────────────────────────────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 3. Community Detection (Leiden Algorithm)                        │
+│    Group related entities into hierarchical communities          │
+│                                                                  │
+│    Level 0: Individual entities                                  │
+│    Level 1: Small clusters (React + Node.js + JavaScript)       │
+│    Level 2: Larger themes (Frontend Tech, Backend Tech)         │
+│    Level 3: Top-level domains (Technology, Business)            │
+└─────────────────────────────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 4. Community Summaries                                           │
+│    LLM generates summary for each community at each level       │
+│    "This community discusses frontend technologies..."          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### GraphRAG Query Types
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    LOCAL SEARCH                                  │
+├─────────────────────────────────────────────────────────────────┤
+│ Query: "What database should I use?"                            │
+│ Process: Find relevant entities → traverse relationships        │
+│ Good for: Specific factual questions                            │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    GLOBAL SEARCH                                 │
+├─────────────────────────────────────────────────────────────────┤
+│ Query: "What are the main themes in this codebase?"             │
+│ Process: Query community summaries at appropriate level         │
+│ Good for: High-level synthesis across entire corpus             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Why Symmetry Doesn't Need GraphRAG
+
+#### 1. Different Problem Space
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    GRAPHRAG USE CASE                             │
+├─────────────────────────────────────────────────────────────────┤
+│ "Analyze 10,000 research papers and tell me the main themes"    │
+│ "What patterns exist across all customer support tickets?"      │
+│ "Summarize the key topics in this 500-page legal document"      │
+│                                                                  │
+│ → Requires: Global synthesis across massive document corpus     │
+│ → Benefit: Hierarchical community summaries                     │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    SYMMETRY USE CASE                             │
+├─────────────────────────────────────────────────────────────────┤
+│ "Continue my e-commerce project in Claude"                      │
+│ "What database did I choose last week?"                         │
+│ "Give me context for this specific project"                     │
+│                                                                  │
+│ → Requires: Fast retrieval of specific conversation context     │
+│ → Benefit: Low-latency, session-based organization              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 2. Latency Requirements
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    LATENCY COMPARISON                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│ GraphRAG Pipeline:                                               │
+│ ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
+│ │ Entity   │→ │Community │→ │ Summary  │→ │  Final   │         │
+│ │ Search   │  │ Lookup   │  │ Retrieval│  │ Response │         │
+│ └──────────┘  └──────────┘  └──────────┘  └──────────┘         │
+│     1-2s         1-2s          2-3s          1-2s               │
+│                                                                  │
+│ Total: 5-10 seconds (unacceptable for real-time)                │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│ Symmetry Pipeline:                                               │
+│ ┌──────────┐  ┌──────────┐  ┌──────────┐                       │
+│ │ Vector   │→ │ Session  │→ │  Final   │                       │
+│ │ Search   │  │ Fetch    │  │ Response │                       │
+│ └──────────┘  └──────────┘  └──────────┘                       │
+│    0.5s         0.3s          0.5s                              │
+│                                                                  │
+│ Total: 1-2 seconds (real-time capable)                          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 3. Index Build Cost
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    GRAPHRAG INDEX BUILD                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│ For 100 conversations:                                           │
+│                                                                  │
+│ • Entity extraction: ~1000 LLM calls                            │
+│ • Relationship mapping: ~500 LLM calls                          │
+│ • Community detection: CPU-intensive graph algorithm            │
+│ • Community summaries: ~100 LLM calls per level × 3 levels     │
+│                                                                  │
+│ Total: ~2000 LLM calls, 10-30 minutes, $5-15 in API costs      │
+│                                                                  │
+│ AND must rebuild when new conversations are added!              │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                    SYMMETRY INDEX BUILD                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│ For 100 conversations:                                           │
+│                                                                  │
+│ • Embedding generation: 100 API calls (batched)                 │
+│ • Knowledge extraction: 100 LLM calls (optional)                │
+│ • Session linking: 0 LLM calls (vector similarity)              │
+│                                                                  │
+│ Total: ~200 API calls, 2-5 minutes, $0.50-2 in API costs       │
+│                                                                  │
+│ Incremental: New conversations added instantly                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 4. Sessions = Communities (Simpler)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│         GRAPHRAG COMMUNITIES vs SYMMETRY SESSIONS                │
+└─────────────────────────────────────────────────────────────────┘
+
+GraphRAG builds communities AUTOMATICALLY through:
+• Leiden algorithm on entity graph
+• Expensive computation
+• Opaque groupings (hard to understand)
+• Requires rebuild on changes
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Community 1: [React, Node.js, JavaScript, npm, webpack]         │
+│ Community 2: [PostgreSQL, Prisma, SQL, database, tables]        │
+│ Community 3: [Stripe, payments, checkout, orders]               │
+│                                                                  │
+│ → User has NO control over these groupings                      │
+│ → May not match user's mental model                             │
+└─────────────────────────────────────────────────────────────────┘
+
+Symmetry builds sessions through:
+• User intent (explicit creation)
+• Semantic similarity (auto-detection)
+• Transparent groupings (user understands)
+• Incremental updates
+
+┌─────────────────────────────────────────────────────────────────┐
+│ Session: "E-commerce Project"                                    │
+│ ├── Conversation 1: Initial planning (ChatGPT)                  │
+│ ├── Conversation 2: Database design (Claude)                    │
+│ └── Conversation 3: Payment integration (Cursor)                │
+│                                                                  │
+│ → User CONTROLS these groupings                                 │
+│ → Matches user's actual project structure                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 5. Query Pattern Mismatch
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TYPICAL SYMMETRY QUERIES                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│ ✓ "Continue my e-commerce project"                              │
+│   → Needs: All conversations in that session, chronologically   │
+│   → GraphRAG: Would search communities, miss conversation flow  │
+│   → Symmetry: Direct session fetch, preserves full context      │
+│                                                                  │
+│ ✓ "What did I decide about the database?"                       │
+│   → Needs: Specific decision with reasoning                     │
+│   → GraphRAG: Would find PostgreSQL entity, miss decision context│
+│   → Symmetry: Vector search + Neo4j decision lookup             │
+│                                                                  │
+│ ✓ "Inject my project context into Claude"                       │
+│   → Needs: Full conversation history, formatted for LLM         │
+│   → GraphRAG: Community summaries lose conversation detail      │
+│   → Symmetry: Raw messages + summary + decisions                │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Comparison Summary
+
 | Aspect | Symmetry | GraphRAG |
 |--------|----------|----------|
-| **Use Case** | Conversation continuity | Global knowledge synthesis |
-| **Query Type** | "Continue my project" | "Patterns across all docs" |
+| **Primary Use Case** | Conversation continuity | Document corpus analysis |
+| **Query Type** | "Continue my project" | "Themes across all docs" |
 | **Latency** | 1-2 seconds | 5-10 seconds |
+| **Index Build Time** | Minutes | Hours |
+| **Cost per 100 docs** | $0.50-2 | $5-15 |
+| **Incremental Updates** | ✓ Instant | ✗ Requires rebuild |
+| **User Control** | ✓ Sessions | ✗ Auto communities |
+| **Conversation Flow** | ✓ Preserved | ✗ Lost in summaries |
 | **Complexity** | Moderate | High |
-| **Cost** | Lower | Higher |
 
-**Symmetry's session-based approach provides similar benefits to GraphRAG's communities, optimized for real-time context injection.**
+### When WOULD You Use GraphRAG?
+
+GraphRAG excels when you need:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ ✓ Global questions across massive document sets                  │
+│   "What are the common complaints in 50,000 support tickets?"   │
+│                                                                  │
+│ ✓ Theme discovery in unknown corpus                              │
+│   "What topics are discussed in this research paper collection?"│
+│                                                                  │
+│ ✓ Cross-document pattern analysis                                │
+│   "How do different authors approach this topic?"               │
+│                                                                  │
+│ ✗ NOT for: Real-time conversation context injection             │
+│ ✗ NOT for: Preserving conversation chronology                   │
+│ ✗ NOT for: User-controlled organization                         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Symmetry's Approach: Best of Both Worlds
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 SYMMETRY'S HYBRID APPROACH                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│ Vector Search (like basic RAG):                                  │
+│ • Fast semantic similarity                                       │
+│ • Chunk-level precision                                          │
+│ • Real-time capable                                              │
+│                                                                  │
+│ Knowledge Graph (like GraphRAG, but simpler):                    │
+│ • Entity extraction                                              │
+│ • Decision tracking                                              │
+│ • Fact storage                                                   │
+│ • NO expensive community detection                               │
+│                                                                  │
+│ Sessions (user-friendly communities):                            │
+│ • Semantic auto-detection                                        │
+│ • User confirmation/override                                     │
+│ • Instant updates                                                │
+│ • Preserves conversation flow                                    │
+│                                                                  │
+│ Result: GraphRAG-like organization with RAG-like speed          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -1598,17 +1868,6 @@ symmetry-mvp/
 | Retrieve (query) | 1-2 sec |
 | Retrieve (session) | 1-3 sec |
 | Recommend | 2-4 sec |
-
----
-
-## 🛣️ Roadmap
-
-- [ ] Browser extension for automatic capture
-- [ ] CLI tool for developers
-- [ ] Webhook support for real-time sync
-- [ ] Team/organization support
-- [ ] Conflict detection
-- [ ] Export/import functionality
 
 ---
 
