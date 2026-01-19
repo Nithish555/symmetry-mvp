@@ -103,6 +103,11 @@ class RecommendationService:
         """
         Get recommendations for a query.
         
+        Uses Knowledge Graph expansion for better recall:
+        1. Extract keywords from query
+        2. Find related entities in user's knowledge graph
+        3. Use expanded terms for better matching
+        
         Args:
             user_id: User ID
             query: The query text (what user is about to discuss)
@@ -126,14 +131,46 @@ class RecommendationService:
         # Extract topics and entities from query
         query_analysis = await self._analyze_query(query)
         
+        # ─────────────────────────────────────────────────────────────
+        # Step 1.5: Knowledge Graph Expansion
+        # Find related entities from user's knowledge graph
+        # ─────────────────────────────────────────────────────────────
+        expanded_entities = []
+        if self.neo4j and self.neo4j.driver:
+            try:
+                # Extract keywords from query
+                query_keywords = self._extract_keywords(query)
+                
+                # Find related entities in knowledge graph
+                if query_keywords:
+                    expanded_entities = await self.neo4j.find_related_entities(
+                        user_id=user_id,
+                        search_terms=query_keywords,
+                        max_hops=2,
+                        limit=10
+                    )
+                    if expanded_entities:
+                        logger.info(f"KG expansion for recommend: {expanded_entities}")
+                        # Add to query analysis for transparency
+                        query_analysis["kg_expanded_entities"] = expanded_entities
+            except Exception as kg_error:
+                logger.warning(f"Knowledge graph expansion failed: {kg_error}")
+        
         recommendations = []
+        
+        # Combine topics with expanded entities for better matching
+        all_topics = list(set(
+            query_analysis.get("topics", []) + 
+            query_analysis.get("entities", []) +
+            expanded_entities
+        ))
         
         # Step 2: Find similar sessions
         if include_sessions:
             session_recs = await self._recommend_sessions(
                 user_id=user_id,
                 embedding=query_embedding,
-                topics=query_analysis.get("topics", []),
+                topics=all_topics,  # Use expanded topics
                 limit=limit
             )
             recommendations.extend(session_recs)
@@ -143,7 +180,7 @@ class RecommendationService:
             conv_recs = await self._recommend_conversations(
                 user_id=user_id,
                 embedding=query_embedding,
-                topics=query_analysis.get("topics", []),
+                topics=all_topics,  # Use expanded topics
                 exclude_session_convs=include_sessions,  # Don't duplicate
                 limit=limit
             )
@@ -177,6 +214,37 @@ class RecommendationService:
         except Exception as e:
             logger.warning(f"Query analysis failed: {e}")
             return {"topics": [], "entities": []}
+    
+    def _extract_keywords(self, query: str) -> List[str]:
+        """
+        Extract meaningful keywords from query for knowledge graph lookup.
+        Simple approach: remove stop words, keep 3+ char words.
+        """
+        stop_words = {
+            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "must", "shall", "can", "need", "to", "of",
+            "in", "for", "on", "with", "at", "by", "from", "as", "into", "through",
+            "during", "before", "after", "above", "below", "between", "under",
+            "again", "further", "then", "once", "here", "there", "when", "where",
+            "why", "how", "all", "each", "few", "more", "most", "other", "some",
+            "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too",
+            "very", "just", "and", "but", "if", "or", "because", "until", "while",
+            "about", "what", "which", "who", "whom", "this", "that", "these",
+            "those", "am", "i", "me", "my", "myself", "we", "our", "ours", "you",
+            "your", "yours", "he", "him", "his", "she", "her", "hers", "it", "its",
+            "they", "them", "their", "theirs"
+        }
+        
+        words = query.lower().split()
+        keywords = [
+            word.strip(".,!?;:'\"()[]{}") 
+            for word in words 
+            if word.lower() not in stop_words and len(word) >= 3
+        ]
+        
+        # Remove duplicates
+        return list(dict.fromkeys(keywords))[:10]
     
     async def _recommend_sessions(
         self,

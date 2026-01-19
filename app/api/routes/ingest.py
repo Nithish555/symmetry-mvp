@@ -11,7 +11,7 @@ from app.api.dependencies import get_postgres, get_neo4j, get_current_user_id, g
 from app.db.postgres import PostgresDB
 from app.db.neo4j import Neo4jDB
 from app.config import Settings
-from app.models.requests import IngestRequest
+from app.models.requests import IngestRequest, Message
 from app.models.responses import (
     IngestResponse, 
     SessionSuggestionResponse, 
@@ -66,13 +66,103 @@ async def ingest_conversation(
             }
         )
     
+    # ═══════════════════════════════════════════════════════════════
+    # APPEND MODE: If conversation_id provided, handle appending
+    # ═══════════════════════════════════════════════════════════════
+    # 
+    # Two sub-modes:
+    # 1. append_only=false (default): messages contains ALL messages, we find new ones
+    # 2. append_only=true: messages contains ONLY new messages to append directly
+    #
+    # ═══════════════════════════════════════════════════════════════
+    
+    existing_conversation = None
+    messages_to_process = request.messages
+    all_messages_for_summary = request.messages  # For generating summary
+    is_append = False
+    
+    if request.conversation_id:
+        logger.info(f"Append mode: checking existing conversation {request.conversation_id}")
+        existing_conversation = await postgres.get_conversation(request.conversation_id, user_id)
+        
+        if not existing_conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": {
+                        "code": "CONVERSATION_NOT_FOUND",
+                        "message": f"Conversation {request.conversation_id} not found"
+                    }
+                }
+            )
+        
+        existing_messages = existing_conversation.get("raw_messages", [])
+        existing_count = len(existing_messages)
+        
+        if request.append_only:
+            # ─────────────────────────────────────────────────────────────
+            # APPEND_ONLY MODE: messages contains ONLY new messages
+            # Extension sends just the new messages, we append directly
+            # ─────────────────────────────────────────────────────────────
+            logger.info(f"Append-only mode: {len(request.messages)} new messages to append")
+            
+            if not request.messages:
+                return IngestResponse(
+                    conversation_id=request.conversation_id,
+                    chunks_created=0,
+                    entities_extracted=0,
+                    relationships_created=0,
+                    status="no_new_messages",
+                    message="No new messages provided."
+                )
+            
+            # Messages to process = all incoming (they're all new)
+            messages_to_process = request.messages
+            
+            # For summary, combine existing + new
+            existing_as_models = [
+                Message(role=m["role"], content=m["content"]) 
+                for m in existing_messages
+            ]
+            all_messages_for_summary = existing_as_models + list(request.messages)
+            is_append = True
+            
+            logger.info(f"Append-only: {existing_count} existing + {len(request.messages)} new = {len(all_messages_for_summary)} total")
+        
+        else:
+            # ─────────────────────────────────────────────────────────────
+            # COMPARE MODE (default): messages contains ALL messages
+            # We compare with existing to find which are new
+            # ─────────────────────────────────────────────────────────────
+            new_count = len(request.messages)
+            
+            if new_count <= existing_count:
+                # No new messages
+                return IngestResponse(
+                    conversation_id=request.conversation_id,
+                    chunks_created=0,
+                    entities_extracted=0,
+                    relationships_created=0,
+                    status="no_new_messages",
+                    message="No new messages to process. Conversation unchanged."
+                )
+            
+            # Extract only the NEW messages (messages after the existing ones)
+            new_messages = request.messages[existing_count:]
+            messages_to_process = new_messages
+            all_messages_for_summary = request.messages  # Already has all
+            is_append = True
+            
+            logger.info(f"Compare mode: {existing_count} existing, {len(new_messages)} new messages to process")
+    
     try:
         # ═══════════════════════════════════════════════════════════════
         # Step 1: Generate summary and extract metadata
         # ═══════════════════════════════════════════════════════════════
+        # Use all_messages_for_summary (includes existing + new in append mode)
         logger.info("Generating conversation summary...")
         summary_result = await generate_conversation_summary(
-            messages=[msg.model_dump() for msg in request.messages],
+            messages=[msg.model_dump() for msg in all_messages_for_summary],
             api_key=config.openai_api_key,
             model=config.llm_model,
             azure_endpoint=config.azure_openai_endpoint,
@@ -89,9 +179,10 @@ async def ingest_conversation(
         # ═══════════════════════════════════════════════════════════════
         # Step 2: Generate conversation-level embedding
         # ═══════════════════════════════════════════════════════════════
+        # Use all_messages_for_summary for embedding (includes existing + new in append mode)
         logger.info("Generating conversation embedding...")
         conv_text = summary if summary else "\n".join([
-            f"{m.role}: {m.content}" for m in request.messages
+            f"{m.role}: {m.content}" for m in all_messages_for_summary
         ])[:4000]
         
         conv_embedding = await generate_embedding(
@@ -108,13 +199,24 @@ async def ingest_conversation(
         # ═══════════════════════════════════════════════════════════════
         # Step 3: Session linking logic
         # ═══════════════════════════════════════════════════════════════
+        # 
+        # Behavior:
+        # - If session_id provided: Link to that session (explicit)
+        # - Otherwise: ALWAYS analyze and provide suggestions
+        #   - If auto_link_session=true AND confidence>85%: Auto-link
+        #   - If auto_link_session=false OR confidence<=85%: Just suggest, don't link
+        #
+        # This ensures users ALWAYS get suggestions for informed decisions,
+        # but retain control when auto_link_session=false.
+        # ═══════════════════════════════════════════════════════════════
+        
         session_id = request.session_id
         session_suggestion = None
         linked_session_id = None
         auto_linked = False
         
         if request.session_id:
-            # User explicitly specified a session
+            # User explicitly specified a session - use it directly
             session = await postgres.get_session(request.session_id, user_id)
             if not session:
                 raise HTTPException(
@@ -127,75 +229,127 @@ async def ingest_conversation(
                     }
                 )
             linked_session_id = request.session_id
+            logger.info(f"Using explicitly specified session: {request.session_id}")
         
-        elif request.auto_link_session:
-            # Analyze and suggest session
-            logger.info("Analyzing conversation for session linking...")
+        else:
+            # ALWAYS analyze for suggestions (regardless of auto_link_session)
+            # This ensures users always get recommendations to make informed decisions
+            logger.info("Analyzing conversation for session suggestions...")
             session_service = await get_session_service(postgres, config)
-            analysis = await session_service.analyze_conversation(
-                messages=[msg.model_dump() for msg in request.messages],
-                user_id=user_id
-            )
             
-            if analysis["suggested_session"]:
-                suggested = analysis["suggested_session"]
-                
-                # Build session suggestion response
-                from datetime import datetime
-                session_suggestion = SessionSuggestionResponse(
-                    suggested_session=SessionInfo(
-                        id=str(suggested["id"]),
-                        name=suggested["name"],
-                        description=suggested.get("description"),
-                        topics=suggested.get("topics", []),
-                        entities=suggested.get("entities", []),
-                        conversation_count=suggested.get("conversation_count", 0),
-                        created_at=suggested.get("created_at") or datetime.now(),
-                        last_activity=suggested.get("last_activity")
-                    ),
-                    confidence=analysis["confidence"],
-                    auto_linked=analysis["auto_link"],
-                    all_suggestions=[
-                        SessionSuggestion(
-                            session_id=s["session_id"],
-                            name=s["name"],
-                            score=s["score"],
-                            topics=s.get("topics", []),
-                            conversation_count=s.get("conversation_count", 0)
-                        )
-                        for s in analysis["all_matches"]
-                    ],
-                    reason=analysis["reason"]
+            try:
+                analysis = await session_service.analyze_conversation(
+                    messages=[msg.model_dump() for msg in request.messages],
+                    user_id=user_id
                 )
                 
-                # Auto-link if high confidence
-                if analysis["auto_link"]:
-                    session_id = str(suggested["id"])
-                    linked_session_id = session_id
-                    auto_linked = True
-                    logger.info(f"Auto-linking to session: {suggested['name']}")
+                if analysis["suggested_session"]:
+                    suggested = analysis["suggested_session"]
+                    
+                    # Determine if we should auto-link:
+                    # Only auto-link if BOTH conditions are met:
+                    # 1. auto_link_session is True (user wants auto-linking)
+                    # 2. confidence is high enough (analysis["auto_link"] = True)
+                    should_auto_link = request.auto_link_session and analysis["auto_link"]
+                    
+                    # Build session suggestion response
+                    from datetime import datetime
+                    session_suggestion = SessionSuggestionResponse(
+                        suggested_session=SessionInfo(
+                            id=str(suggested["id"]),
+                            name=suggested["name"],
+                            description=suggested.get("description"),
+                            topics=suggested.get("topics", []),
+                            entities=suggested.get("entities", []),
+                            conversation_count=suggested.get("conversation_count", 0),
+                            created_at=suggested.get("created_at") or datetime.now(),
+                            last_activity=suggested.get("last_activity")
+                        ),
+                        confidence=analysis["confidence"],
+                        auto_linked=should_auto_link,  # Reflects actual linking decision
+                        all_suggestions=[
+                            SessionSuggestion(
+                                session_id=s["session_id"],
+                                name=s["name"],
+                                score=s["score"],
+                                topics=s.get("topics", []),
+                                conversation_count=s.get("conversation_count", 0)
+                            )
+                            for s in analysis["all_matches"]
+                        ],
+                        reason=analysis["reason"]
+                    )
+                    
+                    # Only auto-link if user enabled it AND confidence is high
+                    if should_auto_link:
+                        session_id = str(suggested["id"])
+                        linked_session_id = session_id
+                        auto_linked = True
+                        logger.info(f"Auto-linking to session: {suggested['name']} (confidence: {analysis['confidence']:.2f})")
+                    else:
+                        # Log why we didn't auto-link
+                        if not request.auto_link_session:
+                            logger.info(f"Suggestion available but auto_link_session=false. User can manually link to: {suggested['name']}")
+                        else:
+                            logger.info(f"Suggestion available but confidence too low ({analysis['confidence']:.2f}). Suggesting: {suggested['name']}")
+                else:
+                    logger.info("No similar sessions found - conversation will be standalone")
+                    
+            except Exception as session_error:
+                logger.warning(f"Session analysis failed (non-critical): {session_error}")
+                # Continue without session linking - conversation will be standalone
         
         # ═══════════════════════════════════════════════════════════════
-        # Step 4: Store conversation
+        # Step 4: Store conversation (CREATE or UPDATE)
         # ═══════════════════════════════════════════════════════════════
-        logger.info("Storing conversation...")
-        conversation = await postgres.create_conversation(
-            user_id=user_id,
-            source=request.source,
-            raw_messages=[msg.model_dump() for msg in request.messages],
-            session_id=session_id,
-            summary=summary,
-            topics=topics,
-            entities=entities
-        )
-        conversation_id = str(conversation["id"])
         
-        # Update with embedding
-        await postgres.update_conversation(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            embedding=conv_embedding
-        )
+        if is_append and existing_conversation:
+            # APPEND MODE: Update existing conversation
+            logger.info(f"Appending to existing conversation {request.conversation_id}...")
+            
+            # Merge old and new messages
+            all_messages = existing_conversation.get("raw_messages", []) + [msg.model_dump() for msg in messages_to_process]
+            
+            # Merge topics and entities (deduplicate)
+            merged_topics = list(set(existing_conversation.get("topics", []) + topics))
+            merged_entities = list(set(existing_conversation.get("entities", []) + entities))
+            
+            # Update conversation with all data
+            await postgres.update_conversation(
+                conversation_id=request.conversation_id,
+                user_id=user_id,
+                raw_messages=all_messages,
+                summary=summary,  # New summary covers full conversation
+                topics=merged_topics,
+                entities=merged_entities,
+                embedding=conv_embedding
+            )
+            conversation_id = request.conversation_id
+            
+            # Keep existing session_id if not explicitly changing
+            if not session_id and existing_conversation.get("session_id"):
+                session_id = str(existing_conversation["session_id"])
+                linked_session_id = session_id
+        else:
+            # CREATE MODE: New conversation
+            logger.info("Storing new conversation...")
+            conversation = await postgres.create_conversation(
+                user_id=user_id,
+                source=request.source,
+                raw_messages=[msg.model_dump() for msg in request.messages],
+                session_id=session_id,
+                summary=summary,
+                topics=topics,
+                entities=entities
+            )
+            conversation_id = str(conversation["id"])
+            
+            # Update with embedding
+            await postgres.update_conversation(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                embedding=conv_embedding
+            )
         
         # ═══════════════════════════════════════════════════════════════
         # Step 5: Record session suggestion for learning
@@ -218,12 +372,23 @@ async def ingest_conversation(
         # ═══════════════════════════════════════════════════════════════
         # Step 6: Chunk and embed for semantic search
         # ═══════════════════════════════════════════════════════════════
+        # In APPEND mode: only chunk the NEW messages
+        # In CREATE mode: chunk all messages
+        
         logger.info("Chunking conversation...")
         chunks = chunk_conversation(
-            messages=request.messages,
+            messages=messages_to_process,  # Only new messages in append mode
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap
         )
+        
+        # Get starting chunk index (for append mode, continue from existing chunks)
+        chunk_start_index = 0
+        if is_append:
+            # Get count of existing chunks for this conversation
+            existing_chunks = await postgres.get_chunks_by_conversation(conversation_id, user_id)
+            chunk_start_index = len(existing_chunks) if existing_chunks else 0
+            logger.info(f"Append mode: starting chunk index at {chunk_start_index}")
         
         logger.info(f"Generating embeddings for {len(chunks)} chunks...")
         embeddings = await generate_embeddings(
@@ -237,14 +402,14 @@ async def ingest_conversation(
             provider=config.llm_provider
         )
         
-        # Store chunks
+        # Store chunks (with correct index for append mode)
         for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
             await postgres.create_chunk(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 content=chunk_text,
                 embedding=embedding,
-                chunk_index=idx
+                chunk_index=chunk_start_index + idx
             )
         
         # ═══════════════════════════════════════════════════════════════
@@ -286,8 +451,24 @@ async def ingest_conversation(
                     )
                     entities_created += 1
                 
-                # Create relationships
+                # Create relationships with full metadata
                 for rel in knowledge.get("relationships", []):
+                    # Extract all metadata from extraction
+                    confidence = rel.get("confidence", 0.5)  # Default to medium confidence
+                    status = rel.get("status", "exploring")  # Default to exploring (safe)
+                    attributed_to = rel.get("attributed_to", "user")  # Who said this
+                    temporal = rel.get("temporal", "current")  # Is this current or past
+                    
+                    # Map relationship type to status if not explicitly provided
+                    if status == "exploring" and rel["type"] in ["CHOSE", "DECIDED"]:
+                        status = "decided"
+                    elif rel["type"] == "REJECTED":
+                        status = "rejected"
+                    elif rel["type"] == "CONSIDERING":
+                        status = "exploring"
+                    elif rel["type"] == "USED":
+                        temporal = "past"  # USED implies past usage
+                    
                     await neo4j.create_relationship(
                         user_id=user_id,
                         source_name=rel["source"],
@@ -295,7 +476,11 @@ async def ingest_conversation(
                         relationship_type=rel["type"],
                         properties=rel.get("properties", {}),
                         conversation_id=conversation_id,
-                        source_platform=request.source
+                        source_platform=request.source,
+                        confidence=confidence,
+                        status=status,
+                        attributed_to=attributed_to,
+                        temporal=temporal
                     )
                     relationships_created += 1
                 
@@ -338,16 +523,19 @@ async def ingest_conversation(
             session_service = await get_session_service(postgres, config)
             await session_service._update_session_embedding(linked_session_id, user_id)
         
-        logger.info(f"Ingestion complete: {chunks} chunks, {entities_created} entities")
+        logger.info(f"Ingestion complete: {len(chunks)} chunks, {entities_created} entities, append={is_append}")
         
         return IngestResponse(
             conversation_id=conversation_id,
             chunks_created=len(chunks),
             entities_extracted=entities_created,
             relationships_created=relationships_created,
-            status="success",
+            status="appended" if is_append else "success",
+            message=f"Appended {len(messages_to_process)} new messages" if is_append else None,
             session_suggestion=session_suggestion,
-            linked_session_id=linked_session_id
+            linked_session_id=linked_session_id,
+            is_append=is_append,
+            new_messages_count=len(messages_to_process) if is_append else len(request.messages)
         )
         
     except HTTPException:

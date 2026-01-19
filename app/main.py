@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
-from app.api.routes import ingest, retrieve, memories, users, conversations, sessions, recommend
+from app.api.routes import ingest, retrieve, memories, users, conversations, sessions, recommend, knowledge
 from app.db.postgres import PostgresDB
 from app.db.neo4j import Neo4jDB
 from app.config import get_settings
@@ -112,6 +112,7 @@ app.include_router(recommend.router, prefix="/api/v1", tags=["Recommend"])
 app.include_router(sessions.router, prefix="/api/v1/sessions", tags=["Sessions"])
 app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["Conversations"])
 app.include_router(memories.router, prefix="/api/v1/memories", tags=["Memories"])
+app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["Knowledge"])
 
 
 @app.get("/", tags=["Health"])

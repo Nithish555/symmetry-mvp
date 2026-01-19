@@ -5,6 +5,7 @@ CRUD operations for session management.
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List, Optional
+from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_postgres, get_neo4j, get_current_user_id, get_config
 from app.db.postgres import PostgresDB
@@ -175,6 +176,165 @@ async def update_session(
     )
     
     return _to_session_info(session)
+
+
+@router.post("/{session_id}/generate-summary")
+async def generate_session_summary(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    postgres: PostgresDB = Depends(get_postgres),
+    config: Settings = Depends(get_config)
+):
+    """
+    Generate a combined summary from all conversations in the session.
+    
+    This creates a unified summary that covers all discussions in the session.
+    The generated summary is saved as the session's description.
+    """
+    from app.services.extraction import generate_conversation_summary
+    
+    # Get session
+    session = await postgres.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "NOT_FOUND", "message": "Session not found"}}
+        )
+    
+    # Get all conversations in session
+    conversations = await postgres.get_conversations_by_session(session_id, user_id)
+    
+    if not conversations:
+        return {
+            "session_id": session_id,
+            "summary": "No conversations in this session yet.",
+            "conversation_count": 0,
+            "message": "Session has no conversations to summarize"
+        }
+    
+    # Combine all conversation summaries and key info
+    combined_text = f"Session: {session['name']}\n\n"
+    
+    all_topics = set()
+    all_entities = set()
+    
+    for i, conv in enumerate(conversations, 1):
+        source = conv.get("source", "unknown")
+        summary = conv.get("summary", "")
+        topics = conv.get("topics", [])
+        entities = conv.get("entities", [])
+        
+        combined_text += f"Conversation {i} ({source}):\n"
+        if summary:
+            combined_text += f"{summary}\n"
+        else:
+            # Use first few messages if no summary
+            messages = conv.get("raw_messages", [])[:3]
+            for msg in messages:
+                combined_text += f"- {msg.get('role', 'user')}: {msg.get('content', '')[:200]}\n"
+        combined_text += "\n"
+        
+        all_topics.update(topics)
+        all_entities.update(entities)
+    
+    # Generate unified summary using LLM
+    import httpx
+    
+    prompt = f"""Create a unified summary of this session that covers all conversations.
+The summary should:
+1. Capture the main objective/project
+2. List key decisions made
+3. Note important topics discussed
+4. Be concise (2-4 sentences)
+
+Session content:
+{combined_text[:4000]}
+
+Topics covered: {', '.join(all_topics) if all_topics else 'Not specified'}
+Key entities: {', '.join(all_entities) if all_entities else 'Not specified'}
+
+Return only the summary text, no formatting."""
+
+    async with httpx.AsyncClient() as client:
+        if config.llm_provider == "azure_openai":
+            url = f"{config.azure_openai_endpoint.rstrip('/')}/openai/deployments/{config.azure_openai_deployment}/chat/completions?api-version={config.azure_openai_api_version}"
+            headers = {"api-key": config.azure_openai_api_key, "Content-Type": "application/json"}
+        else:
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {config.openai_api_key}", "Content-Type": "application/json"}
+        
+        json_body = {
+            "messages": [
+                {"role": "system", "content": "You create concise, informative summaries of multi-conversation sessions."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 500
+        }
+        
+        if config.llm_provider != "azure_openai":
+            json_body["model"] = config.llm_model
+        
+        response = await client.post(url, headers=headers, json=json_body, timeout=60.0)
+        response.raise_for_status()
+        data = response.json()
+        
+        generated_summary = data["choices"][0]["message"]["content"].strip()
+    
+    # Save the generated summary as session description
+    await postgres.update_session(
+        session_id=session_id,
+        user_id=user_id,
+        description=generated_summary
+    )
+    
+    return {
+        "session_id": session_id,
+        "summary": generated_summary,
+        "conversation_count": len(conversations),
+        "topics": list(all_topics),
+        "entities": list(all_entities),
+        "message": "✅ Session summary generated and saved"
+    }
+
+
+class UpdateSessionSummaryRequest(BaseModel):
+    """Request to update session summary."""
+    summary: str = Field(..., min_length=1, max_length=5000)
+
+
+@router.patch("/{session_id}/summary")
+async def update_session_summary(
+    session_id: str,
+    request: UpdateSessionSummaryRequest,
+    user_id: str = Depends(get_current_user_id),
+    postgres: PostgresDB = Depends(get_postgres)
+):
+    """
+    Manually update/edit the session summary.
+    
+    Use this to correct or customize the auto-generated summary.
+    """
+    # Get session
+    session = await postgres.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "NOT_FOUND", "message": "Session not found"}}
+        )
+    
+    # Update description (which serves as summary)
+    await postgres.update_session(
+        session_id=session_id,
+        user_id=user_id,
+        description=request.summary
+    )
+    
+    return {
+        "session_id": session_id,
+        "summary": request.summary,
+        "message": "✅ Session summary updated"
+    }
 
 
 @router.delete("/{session_id}", response_model=DeleteResponse)

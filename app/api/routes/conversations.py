@@ -4,6 +4,7 @@ Conversations endpoints - View and manage stored conversations.
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Optional
+from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_postgres, get_current_user_id
 from app.db.postgres import PostgresDB
@@ -16,6 +17,20 @@ from app.models.responses import (
 
 
 router = APIRouter()
+
+
+# ============================================================================
+# Request Models
+# ============================================================================
+
+class UpdateSummaryRequest(BaseModel):
+    """Request to update a conversation's summary."""
+    summary: str = Field(
+        ..., 
+        min_length=1, 
+        max_length=5000,
+        description="The new/edited summary for this conversation"
+    )
 
 
 @router.get("", response_model=ConversationsListResponse)
@@ -127,6 +142,60 @@ async def get_conversation(
                     "message": f"Failed to get conversation: {str(e)}"
                 }
             }
+        )
+
+
+@router.patch("/{conversation_id}/summary")
+async def update_conversation_summary(
+    conversation_id: str,
+    request: UpdateSummaryRequest,
+    user_id: str = Depends(get_current_user_id),
+    postgres: PostgresDB = Depends(get_postgres)
+):
+    """
+    Update/edit the summary of a conversation.
+    
+    Use this when:
+    - The auto-generated summary is incorrect
+    - You want to add more context
+    - You want to simplify or clarify the summary
+    
+    The edited summary will be used in future retrievals.
+    """
+    try:
+        # Check conversation exists
+        conversation = await postgres.get_conversation(conversation_id, user_id)
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": {"code": "NOT_FOUND", "message": "Conversation not found"}}
+            )
+        
+        # Update the summary
+        updated = await postgres.update_conversation(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            summary=request.summary
+        )
+        
+        if not updated:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": {"code": "UPDATE_FAILED", "message": "Failed to update summary"}}
+            )
+        
+        return {
+            "id": conversation_id,
+            "summary": request.summary,
+            "message": "✅ Summary updated successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": {"code": "UPDATE_FAILED", "message": f"Failed to update summary: {str(e)}"}}
         )
 
 

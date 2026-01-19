@@ -76,10 +76,14 @@ class IngestResponse(BaseModel):
     chunks_created: int
     entities_extracted: int
     relationships_created: int
-    status: str
+    status: str  # "success", "appended", "no_new_messages"
+    message: Optional[str] = None  # Optional message for status details
     # Session suggestion info
     session_suggestion: Optional[SessionSuggestionResponse] = None
     linked_session_id: Optional[str] = None
+    # Append mode info
+    is_append: bool = False
+    new_messages_count: int = 0
 
 
 # =========================================================================
@@ -87,11 +91,27 @@ class IngestResponse(BaseModel):
 # =========================================================================
 
 class DecisionInfo(BaseModel):
-    """Information about a decision."""
+    """Information about a decision with full metadata."""
     content: str
     reason: Optional[str] = None
     date: Optional[str] = None
-    source: Optional[str] = None
+    source: Optional[str] = None  # Platform (claude, chatgpt, etc.)
+    confidence: Optional[float] = None  # 0.0-1.0
+    status: Optional[str] = None  # decided, exploring, rejected
+    verified: Optional[bool] = None  # User has verified this
+    attributed_to: Optional[str] = None  # user, colleague, article, ai_suggestion
+    temporal: Optional[str] = None  # current, past, future
+    note: Optional[str] = None  # Additional context (e.g., "hypothetical")
+
+
+class ContradictionWarning(BaseModel):
+    """Warning about contradictory decisions."""
+    old_decision: str
+    old_date: Optional[str] = None
+    new_decision: str
+    new_date: Optional[str] = None
+    category: Optional[str] = None
+    message: str
 
 
 class FactInfo(BaseModel):
@@ -108,6 +128,34 @@ class SourceInfo(BaseModel):
     date: Optional[datetime] = None
 
 
+class KnowledgeQuality(BaseModel):
+    """
+    Quality indicators for the returned knowledge.
+    Helps users understand how reliable the context is.
+    """
+    total_decisions: int = 0
+    confirmed_decisions: int = 0  # High confidence, verified
+    exploring_count: int = 0  # Items being considered
+    rejected_count: int = 0  # Explicitly rejected items
+    unverified_count: int = 0  # Not verified by user
+    contradictions_count: int = 0  # Conflicting decisions
+    others_suggestions: int = 0  # Attributed to colleagues/articles
+    past_items: int = 0  # Historical, not current
+    
+    # Quality score (0-100)
+    quality_score: int = 100
+    quality_notes: List[str] = []
+
+
+class ChunkInfo(BaseModel):
+    """Information about a retrieved chunk."""
+    id: Optional[str] = None
+    content: str
+    source: Optional[str] = None
+    conversation_id: Optional[str] = None
+    similarity: Optional[float] = None
+
+
 class RetrieveResponse(BaseModel):
     """Response with retrieved context."""
     summary: str
@@ -119,6 +167,13 @@ class RetrieveResponse(BaseModel):
     chunks_found: int
     # Session info if applicable
     session: Optional[SessionInfo] = None
+    # Warnings about potential issues
+    contradictions: List[ContradictionWarning] = []
+    unverified_count: int = 0  # Number of unverified knowledge items
+    # Knowledge quality summary
+    knowledge_quality: Optional[KnowledgeQuality] = None
+    # Raw chunks for custom prompt building (optional)
+    chunks: List[ChunkInfo] = []
 
 
 # =========================================================================

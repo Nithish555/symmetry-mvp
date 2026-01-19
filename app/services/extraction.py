@@ -1,14 +1,23 @@
 """
 Knowledge extraction service.
 Uses LLM to extract entities and relationships from conversations.
+
+Production-level extraction with:
+- Confidence scoring
+- Source attribution
+- Temporal markers
+- Validation and normalization
 """
 
-from typing import List
+from typing import List, Dict, Any
 import httpx
 import json
+import logging
 
 from app.models.requests import Message
 from app.prompts.extraction import EXTRACTION_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 def format_messages_for_extraction(messages: List[Message]) -> str:
@@ -19,6 +28,95 @@ def format_messages_for_extraction(messages: List[Message]) -> str:
         content = msg.content.strip()
         parts.append(f"{role}: {content}")
     return "\n\n".join(parts)
+
+
+def _normalize_relationship(rel: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize and validate a relationship extracted by the LLM.
+    Ensures all required fields exist with sensible defaults.
+    """
+    # Default values
+    normalized = {
+        "source": rel.get("source", "User"),
+        "target": rel.get("target", "Unknown"),
+        "type": rel.get("type", "RELATED_TO"),
+        "status": rel.get("status", "exploring"),
+        "confidence": rel.get("confidence", 0.5),
+        "attributed_to": rel.get("attributed_to", "user"),
+        "temporal": rel.get("temporal", "current"),
+        "properties": rel.get("properties", {}),
+        "verified": False  # Always starts unverified
+    }
+    
+    # Normalize type
+    type_upper = normalized["type"].upper()
+    valid_types = {"CHOSE", "DECIDED", "CONSIDERING", "REJECTED", "PREFERS", 
+                   "USES", "BUILDS", "WORKS_AT", "RELATED_TO", "USED"}
+    if type_upper not in valid_types:
+        normalized["type"] = "RELATED_TO"
+    else:
+        normalized["type"] = type_upper
+    
+    # Normalize status based on type
+    if normalized["type"] in ("CHOSE", "DECIDED"):
+        if normalized["status"] not in ("decided", "exploring"):
+            normalized["status"] = "decided"
+    elif normalized["type"] == "REJECTED":
+        normalized["status"] = "rejected"
+    elif normalized["type"] == "CONSIDERING":
+        normalized["status"] = "exploring"
+    elif normalized["type"] == "USED":
+        normalized["temporal"] = "past"
+    
+    # Clamp confidence to valid range
+    try:
+        conf = float(normalized["confidence"])
+        normalized["confidence"] = max(0.0, min(1.0, conf))
+    except (ValueError, TypeError):
+        normalized["confidence"] = 0.5
+    
+    # Validate attributed_to
+    valid_sources = {"user", "colleague", "article", "docs", "ai_suggestion", "other"}
+    if normalized["attributed_to"] not in valid_sources:
+        normalized["attributed_to"] = "user"
+    
+    # Validate temporal
+    if normalized["temporal"] not in ("current", "past", "future"):
+        normalized["temporal"] = "current"
+    
+    # Ensure properties is a dict
+    if not isinstance(normalized["properties"], dict):
+        normalized["properties"] = {}
+    
+    return normalized
+
+
+def _normalize_fact(fact: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a fact extracted by the LLM."""
+    return {
+        "subject": fact.get("subject", "User"),
+        "predicate": fact.get("predicate", "RELATED_TO"),
+        "object": fact.get("object", "Unknown"),
+        "confidence": max(0.0, min(1.0, float(fact.get("confidence", 0.8)))),
+        "temporal": fact.get("temporal", "current"),
+        "valid_from": fact.get("valid_from"),
+        "valid_to": fact.get("valid_to")
+    }
+
+
+def _normalize_entity(entity: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize an entity extracted by the LLM."""
+    valid_types = {"Tool", "Project", "Company", "Person", "Concept", "Technology", "Other"}
+    entity_type = entity.get("type", "Other")
+    if entity_type not in valid_types:
+        entity_type = "Other"
+    
+    return {
+        "name": entity.get("name", "Unknown"),
+        "type": entity_type,
+        "description": entity.get("description", ""),
+        "first_mentioned": entity.get("first_mentioned", "")
+    }
 
 
 async def extract_knowledge(
@@ -97,11 +195,12 @@ async def extract_knowledge(
         try:
             knowledge = json.loads(content)
         except json.JSONDecodeError:
-            # Return empty structure if parsing fails
+            logger.warning("Failed to parse LLM extraction response as JSON")
             knowledge = {
                 "entities": [],
                 "relationships": [],
-                "facts": []
+                "facts": [],
+                "warnings": []
             }
         
         # Ensure all required keys exist
@@ -111,6 +210,53 @@ async def extract_knowledge(
             knowledge["relationships"] = []
         if "facts" not in knowledge:
             knowledge["facts"] = []
+        if "warnings" not in knowledge:
+            knowledge["warnings"] = []
+        
+        # ═══════════════════════════════════════════════════════════════
+        # NORMALIZE AND VALIDATE ALL EXTRACTED DATA
+        # ═══════════════════════════════════════════════════════════════
+        
+        # Normalize entities
+        knowledge["entities"] = [
+            _normalize_entity(e) for e in knowledge["entities"]
+            if isinstance(e, dict) and e.get("name")
+        ]
+        
+        # Normalize relationships with validation
+        normalized_rels = []
+        for rel in knowledge["relationships"]:
+            if isinstance(rel, dict) and rel.get("target"):
+                normalized = _normalize_relationship(rel)
+                normalized_rels.append(normalized)
+                
+                # Log low-confidence extractions
+                if normalized["confidence"] < 0.5:
+                    logger.debug(f"Low confidence extraction: {normalized['target']} ({normalized['confidence']})")
+        
+        knowledge["relationships"] = normalized_rels
+        
+        # Normalize facts
+        knowledge["facts"] = [
+            _normalize_fact(f) for f in knowledge["facts"]
+            if isinstance(f, dict) and f.get("object")
+        ]
+        
+        # Add extraction metadata
+        knowledge["_metadata"] = {
+            "entities_count": len(knowledge["entities"]),
+            "relationships_count": len(knowledge["relationships"]),
+            "facts_count": len(knowledge["facts"]),
+            "high_confidence_count": sum(1 for r in knowledge["relationships"] if r["confidence"] >= 0.8),
+            "low_confidence_count": sum(1 for r in knowledge["relationships"] if r["confidence"] < 0.5),
+            "has_warnings": len(knowledge.get("warnings", [])) > 0
+        }
+        
+        logger.info(
+            f"Extracted: {knowledge['_metadata']['entities_count']} entities, "
+            f"{knowledge['_metadata']['relationships_count']} relationships "
+            f"({knowledge['_metadata']['high_confidence_count']} high confidence)"
+        )
         
         return knowledge
 

@@ -228,9 +228,45 @@ Response:
 **Confidence Rules:**
 | Confidence | Action |
 |------------|--------|
-| > 85% | Auto-link (no user action needed) |
+| > 85% | Auto-link (if `auto_link_session: true`) |
 | 70-85% | Suggest to user for confirmation |
 | < 70% | Keep standalone |
+
+**`auto_link_session` Parameter:**
+
+| Value | Suggestions | Auto-Link |
+|-------|-------------|-----------|
+| `true` (default) | ✅ Always returned | ✅ If confidence > 85% |
+| `false` | ✅ Always returned | ❌ Never (user must confirm) |
+
+```json
+// Example: Get suggestions but don't auto-link
+POST /api/v1/ingest
+{
+  "source": "chatgpt",
+  "messages": [...],
+  "auto_link_session": false  // Manual mode
+}
+
+// Response always includes suggestions:
+{
+  "conversation_id": "conv-789",
+  "linked_session_id": null,  // NOT auto-linked
+  "session_suggestion": {
+    "suggested_session": { "name": "E-commerce Project" },
+    "confidence": 0.92,
+    "auto_linked": false,     // Reflects that it wasn't linked
+    "all_suggestions": [...]  // Other options available
+  }
+}
+
+// User can then manually confirm:
+POST /api/v1/sessions/confirm-link
+{
+  "conversation_id": "conv-789",
+  "session_id": "session-123"
+}
+```
 
 ---
 

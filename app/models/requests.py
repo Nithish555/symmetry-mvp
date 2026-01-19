@@ -29,13 +29,34 @@ class IngestRequest(BaseModel):
         min_length=1,
         description="List of messages in the conversation"
     )
+    conversation_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional: ID of existing conversation to append to. "
+            "Use with `append_only=false` (default): Send ALL messages, system finds new ones. "
+            "Use with `append_only=true`: Send ONLY new messages, system appends directly."
+        )
+    )
+    append_only: bool = Field(
+        False,
+        description=(
+            "Only used when conversation_id is provided. "
+            "When false (default): messages contains ALL messages (old+new), system compares to find new ones. "
+            "When true: messages contains ONLY new messages to append directly."
+        )
+    )
     session_id: Optional[str] = Field(
         None,
-        description="Optional: ID of session to link this conversation to"
+        description="Optional: ID of session to link this conversation to. If provided, skips session analysis."
     )
     auto_link_session: bool = Field(
         True,
-        description="If true, automatically suggest/link to existing sessions"
+        description=(
+            "Controls auto-linking behavior. "
+            "When true: Auto-link if confidence >85%, otherwise just suggest. "
+            "When false: Always return suggestions but NEVER auto-link (user must confirm manually). "
+            "Suggestions are ALWAYS returned regardless of this setting."
+        )
     )
 
 
@@ -68,6 +89,60 @@ class RetrieveRequest(BaseModel):
         ge=1,
         le=50,
         description="Maximum number of items to return"
+    )
+    
+    # ═══════════════════════════════════════════════════════════════
+    # CONTEXT CUSTOMIZATION OPTIONS
+    # ═══════════════════════════════════════════════════════════════
+    include_exploring: bool = Field(
+        default=True,
+        description="Include items being considered (not decided yet)"
+    )
+    include_rejected: bool = Field(
+        default=True,
+        description="Include rejected options"
+    )
+    include_others_suggestions: bool = Field(
+        default=True,
+        description="Include suggestions from colleagues/articles (not user's own)"
+    )
+    only_verified: bool = Field(
+        default=False,
+        description="Only include user-verified knowledge"
+    )
+    exclude_entities: List[str] = Field(
+        default=[],
+        description="List of entity names to exclude from context (e.g., ['MySQL', 'MongoDB'])"
+    )
+    exclude_decision_ids: List[str] = Field(
+        default=[],
+        description="List of specific decision IDs to exclude"
+    )
+    custom_note: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Custom note to add at the top of context_prompt"
+    )
+    max_context_length: Optional[int] = Field(
+        default=None,
+        ge=500,
+        le=10000,
+        description="Maximum length of context_prompt (truncates if exceeded)"
+    )
+    custom_summary: Optional[str] = Field(
+        default=None,
+        max_length=5000,
+        description=(
+            "If provided, use this as the summary instead of generating one. "
+            "Useful when user has edited/customized their summary."
+        )
+    )
+    skip_summary_generation: bool = Field(
+        default=False,
+        description=(
+            "If true, skip LLM summary generation (faster response). "
+            "Use stored conversation/session summary instead."
+        )
     )
 
 
