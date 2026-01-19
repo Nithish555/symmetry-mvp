@@ -14,15 +14,18 @@ Symmetry is a memory and knowledge layer that enables seamless conversation cont
 
 1. [The Problem](#-the-problem)
 2. [The Solution](#-the-solution)
-3. [Quick Start](#-quick-start)
-4. [Use Cases](#-use-cases)
-5. [Deep Dive: How It Works](#-deep-dive-how-it-works)
-   - [Ingestion Pipeline](#ingestion-pipeline-post-ingest)
-   - [Retrieval Pipeline](#retrieval-pipeline-post-retrieve)
-   - [Recommendation Pipeline](#recommendation-pipeline-post-recommend)
-6. [Architecture](#-architecture)
-7. [Data Model](#-data-model)
-8. [Key Techniques](#-key-techniques)
+3. [Architecture Overview](#-architecture-overview)
+4. [Quick Start](#-quick-start)
+5. [Deep Dive: System Layers](#-deep-dive-system-layers)
+   - [API Layer](#1-api-layer)
+   - [Service Layer](#2-service-layer)
+   - [Data Layer](#3-data-layer)
+6. [Core Pipelines](#-core-pipelines)
+   - [Ingestion Pipeline](#ingestion-pipeline)
+   - [Retrieval Pipeline](#retrieval-pipeline)
+   - [Recommendation Pipeline](#recommendation-pipeline)
+7. [Key Algorithms & Techniques](#-key-algorithms--techniques)
+8. [Data Models](#-data-models)
 9. [API Reference](#-api-reference)
 10. [Configuration](#-configuration)
 11. [Project Structure](#-project-structure)
@@ -63,6 +66,61 @@ Wednesday (Cursor):  [Symmetry injects context] → Cursor continues seamlessly!
 | **Semantic Search** | Find relevant context using natural language queries |
 | **Smart Recommendations** | Get suggestions for relevant past conversations |
 | **Knowledge Extraction** | Automatically extracts decisions, facts, and entities |
+| **Contradiction Detection** | Warns when you contradict past decisions |
+
+---
+
+## 🏗️ Architecture Overview
+
+Symmetry uses a **layered architecture** with two main data stores:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SYMMETRY SYSTEM                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐                        │
+│   │ ChatGPT │  │ Claude  │  │ Cursor  │  │  Other  │    ← AI Clients        │
+│   └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘                        │
+│        └────────────┴────────────┴────────────┘                              │
+│                          │                                                   │
+│                          ▼                                                   │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                        API LAYER (FastAPI)                            │  │
+│   │  /ingest  /retrieve  /recommend  /sessions  /users  /knowledge       │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                          │                                                   │
+│                          ▼                                                   │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                       SERVICE LAYER                                   │  │
+│   │  ChunkingService    EmbeddingService    ExtractionService            │  │
+│   │  SessionService     RecommendationService    SummarizationService    │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                          │                                                   │
+│            ┌─────────────┴─────────────┐                                    │
+│            ▼                           ▼                                    │
+│   ┌─────────────────────┐   ┌─────────────────────┐                        │
+│   │    MEMORY LAYER     │   │   KNOWLEDGE LAYER   │                        │
+│   │                     │   │                     │                        │
+│   │   PostgreSQL +      │   │      Neo4j          │                        │
+│   │   pgvector          │   │   (Graph DB)        │                        │
+│   │                     │   │                     │                        │
+│   │ • Users             │   │ • Entities          │                        │
+│   │ • Sessions          │   │ • Relationships     │                        │
+│   │ • Conversations     │   │ • Decisions         │                        │
+│   │ • Chunks            │   │ • Facts             │                        │
+│   │ • Embeddings        │   │                     │                        │
+│   └─────────────────────┘   └─────────────────────┘                        │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why Two Databases?
+
+| Database | Purpose | Strength |
+|----------|---------|----------|
+| **PostgreSQL + pgvector** | Memory Layer | Fast vector similarity search, relational data, ACID compliance |
+| **Neo4j** | Knowledge Layer | Graph traversal, relationship queries, entity connections |
 
 ---
 
@@ -76,8 +134,8 @@ git clone https://github.com/yourusername/symmetry-mvp.git
 cd symmetry-mvp
 
 # Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
@@ -95,7 +153,7 @@ cp env.example .env
 scripts/setup_db.sql
 ```
 
-**Neo4j (Optional):**
+**Neo4j (Optional but recommended):**
 ```bash
 # Run in Neo4j Browser
 scripts/setup_neo4j.cypher
@@ -120,855 +178,857 @@ curl -X POST http://localhost:8000/api/v1/users/register \
 
 ---
 
-## 📋 Use Cases
+## 🔬 Deep Dive: System Layers
 
-### Overview
+### 1. API Layer
 
-| Use Case | Endpoint | When to Use |
-|----------|----------|-------------|
-| Save a conversation | `POST /ingest` | After each AI conversation |
-| Continue in new LLM | `POST /retrieve` (session mode) | Switching from ChatGPT to Claude |
-| Find specific info | `POST /retrieve` (query mode) | "What database did I choose?" |
-| Get all context | `POST /retrieve` (full mode) | Starting completely fresh |
-| Find relevant context | `POST /recommend` | Before starting new conversation |
-| Manage sessions | `POST /sessions` | Organize conversations manually |
+**Location:** `app/api/routes/`
+
+The API layer handles HTTP requests and responses using FastAPI. Each route file handles a specific domain:
+
+```
+app/api/routes/
+├── users.py          # User registration, authentication
+├── ingest.py         # Store conversations (POST /ingest)
+├── retrieve.py       # Get context (POST /retrieve)
+├── recommend.py      # Get recommendations (POST /recommend)
+├── sessions.py       # Session management (CRUD)
+├── conversations.py  # Conversation management
+├── memories.py       # Memory operations
+└── knowledge.py      # Knowledge graph operations
+```
+
+#### Key Concepts:
+
+**Dependency Injection (`app/api/dependencies.py`):**
+```python
+# Every route gets these injected automatically:
+user_id: str = Depends(get_current_user_id)      # From API key
+postgres: PostgresDB = Depends(get_postgres)      # Database connection
+neo4j: Neo4jDB = Depends(get_neo4j)              # Graph database
+config: Settings = Depends(get_config)            # App settings
+```
+
+**Authentication:**
+- All endpoints require `Authorization: Bearer sk_your_api_key` header
+- API key is validated against the `users` table
+- User ID is extracted and passed to all operations
 
 ---
 
-### Use Case 1: Continue Project Across LLMs
+### 2. Service Layer
 
-**Scenario:** Started a project in ChatGPT, want to continue in Claude.
+**Location:** `app/services/`
+
+The service layer contains the core business logic. Each service is a focused module:
 
 ```
-STEP 1: Save ChatGPT conversation
-────────────────────────────────
-POST /api/v1/ingest
-{
-  "source": "chatgpt",
-  "messages": [
-    {"role": "user", "content": "Building e-commerce with React..."},
-    {"role": "assistant", "content": "Great! Use PostgreSQL..."}
-  ]
-}
+app/services/
+├── chunking.py       # Text splitting with semantic awareness
+├── embedding.py      # Vector embedding generation
+├── extraction.py     # Knowledge extraction from text
+├── session.py        # Session detection and linking
+├── recommendation.py # Recommendation scoring algorithm
+└── summarization.py  # Context summary generation
+```
 
-Response:
-{
-  "conversation_id": "conv-123",
-  "summary": "User building e-commerce with React, chose PostgreSQL"
-}
+#### 2.1 Chunking Service (`chunking.py`)
 
+**Purpose:** Split conversations into smaller pieces for embedding while preserving meaning.
 
-STEP 2: Create/link to session
-──────────────────────────────
-POST /api/v1/sessions
-{ "name": "E-commerce Project" }
+**Key Innovation: Semantic-Aware Chunking**
 
-POST /api/v1/sessions/{session_id}/conversations
-{ "conversation_id": "conv-123" }
+Unlike simple character-based splitting, Symmetry's chunker:
 
+1. **Splits at sentence boundaries** - Never cuts mid-thought
+2. **Preserves negations** - "NOT going to use X" stays together
+3. **Keeps decisions with reasons** - "I chose X because Y" stays together
+4. **Protects code blocks** - Never splits code
+5. **Message-aware** - Prefers splitting between USER/ASSISTANT messages
 
-STEP 3: Get context for Claude
-──────────────────────────────
-POST /api/v1/retrieve
-{ "mode": "session", "session_id": "..." }
+```python
+# Bad chunking (character-based):
+Chunk 1: "I'm NOT going to use Mon"
+Chunk 2: "goDB because it lacks ACID"  # Lost the negation context!
 
-Response includes ready-to-inject context_prompt:
-┌──────────────────────────────────────────────────────────┐
-│ [CONTEXT FROM PREVIOUS AI CONVERSATIONS]                 │
-│                                                          │
-│ ## Session: E-commerce Project                           │
-│                                                          │
-│ ### [chatgpt] - 2026-01-17                              │
-│ USER: Building e-commerce with React...                  │
-│ ASSISTANT: Great! Use PostgreSQL...                      │
-│                                                          │
-│ ## Key Decisions:                                        │
-│ - Chose PostgreSQL for database                          │
-│ - Using React + Node.js                                  │
-│                                                          │
-│ [END SYMMETRY CONTEXT]                                   │
-└──────────────────────────────────────────────────────────┘
+# Good chunking (semantic-aware):
+Chunk 1: "I'm NOT going to use MongoDB because it lacks ACID compliance."
+```
 
-STEP 4: Paste into Claude and continue!
+**Decision Boundary Detection:**
+
+The chunker identifies patterns that shouldn't be split:
+
+```python
+# Positive decisions
+"I'll use", "I decided", "going with", "let's use"
+
+# Negative decisions (CRITICAL - keeps negation with subject)
+"NOT going to", "won't use", "decided against", "ruled out"
+
+# Comparisons
+"better than", "prefer X over", "instead of"
+
+# Conclusions
+"because", "therefore", "the reason is"
+```
+
+**Chunking Modes:**
+
+| Mode | Function | Use Case |
+|------|----------|----------|
+| `chunk_conversation_semantic()` | Semantic-aware splitting | Default, recommended |
+| `chunk_by_exchange()` | User-Assistant pairs | Keep Q&A together |
+| `chunk_with_context()` | Chunks with surrounding context | Better retrieval |
+
+---
+
+#### 2.2 Embedding Service (`embedding.py`)
+
+**Purpose:** Convert text into vector representations for semantic search.
+
+**How It Works:**
+
+```
+Text: "I chose PostgreSQL for my e-commerce project"
+         │
+         ▼
+    OpenAI/Azure API (text-embedding-3-large)
+         │
+         ▼
+Vector: [0.0234, -0.0891, 0.1456, ..., 0.0023]  (3072 floats)
+```
+
+**Why Embeddings?**
+
+Embeddings capture **semantic meaning**, not just keywords:
+
+```
+Query: "What database did I pick?"
+         ↓ Similar vector to:
+Stored: "I chose PostgreSQL for the project"
+
+Even though "pick" ≠ "chose" and "database" ≠ "PostgreSQL",
+the vectors are close because the MEANING is similar.
+```
+
+**Configuration:**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `embedding_model` | text-embedding-3-large | OpenAI model |
+| `embedding_dimensions` | 3072 | Vector size |
+| `provider` | azure_openai | OpenAI or Azure |
+
+---
+
+#### 2.3 Extraction Service (`extraction.py`)
+
+**Purpose:** Extract structured knowledge (entities, relationships, decisions) from conversations.
+
+**What Gets Extracted:**
+
+```
+Conversation: "I'll use PostgreSQL. My colleague suggested MongoDB but I ruled it out."
+                                    │
+                                    ▼
+                            LLM Analysis (GPT-4o-mini)
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ENTITIES:                                                                    │
+│   • PostgreSQL (Tool) - "Relational database"                               │
+│   • MongoDB (Tool) - "NoSQL database"                                       │
+│                                                                              │
+│ RELATIONSHIPS:                                                               │
+│   • User ──CHOSE──→ PostgreSQL (confidence: 0.95, status: decided)          │
+│   • User ──REJECTED──→ MongoDB (confidence: 0.85, status: rejected)         │
+│   • User ──CONSIDERING──→ MongoDB (attributed_to: colleague)                │
+│                                                                              │
+│ FACTS:                                                                       │
+│   • User WORKS_ON E-commerce Project (temporal: current)                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Decision Status Classification:**
+
+| User Says | Status | Type | Confidence |
+|-----------|--------|------|------------|
+| "I'll use X", "I decided on X" | decided | CHOSE | 0.85-1.0 |
+| "I think X", "Leaning toward X" | exploring | CONSIDERING | 0.5-0.7 |
+| "Maybe X", "What about X?" | exploring | CONSIDERING | 0.3-0.5 |
+| "I won't use X", "Ruled out X" | rejected | REJECTED | 0.8-1.0 |
+
+**Critical: Negation Detection**
+
+The extraction prompt is specifically designed to catch negations:
+
+```python
+# These are NOT decisions to USE something:
+"I'm NOT going to use MongoDB"     → REJECTED (not CHOSE!)
+"I decided against Redis"          → REJECTED
+"We ruled out DynamoDB"            → REJECTED
+```
+
+**Source Attribution:**
+
+Every extracted relationship tracks WHO said it:
+
+| Source | Meaning |
+|--------|---------|
+| `user` | The person in the conversation |
+| `colleague` | Someone the user mentioned |
+| `article` | External documentation/blog |
+| `ai_suggestion` | The AI assistant suggested it |
+
+---
+
+#### 2.4 Session Service (`session.py`)
+
+**Purpose:** Automatically detect and link related conversations into sessions.
+
+**How Session Detection Works:**
+
+```
+New Conversation: "Help me add Stripe payments to my React store"
+                                    │
+                                    ▼
+                        Generate Conversation Embedding
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ SEARCH EXISTING SESSIONS BY SIMILARITY                                       │
+│                                                                              │
+│ SELECT * FROM sessions                                                       │
+│ WHERE 1 - (embedding <=> new_embedding) > 0.5                               │
+│ ORDER BY embedding <=> new_embedding                                         │
+│ LIMIT 5                                                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ RESULTS:                                                                     │
+│                                                                              │
+│   Session                    │ Similarity │ Recency Boost │ Final Score    │
+│   ─────────────────────────────────────────────────────────────────────────│
+│   E-commerce Project         │    0.92    │    +0.08      │    0.96  ✓     │
+│   React Learning             │    0.71    │    +0.02      │    0.73        │
+│   Personal Blog              │    0.45    │    +0.00      │    0.45        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                        DECISION LOGIC:
+                        
+    IF score > 0.85 AND auto_link_session=true:
+        → AUTO-LINK (high confidence)
+    ELIF score > 0.70:
+        → SUGGEST (user confirms)
+    ELSE:
+        → STANDALONE (no match)
+```
+
+**Confidence Thresholds:**
+
+| Confidence | Action | User Control |
+|------------|--------|--------------|
+| > 85% | Auto-link (if enabled) | `auto_link_session: true` |
+| 70-85% | Suggest to user | User must confirm |
+| < 70% | Keep standalone | No suggestion |
+
+**Recency Boost:**
+
+Recent sessions get a score boost to prefer active projects:
+
+```python
+if hours_ago <= 24:
+    recency_boost = 0.1 * (1 - hours_ago / 24)
+else:
+    recency_boost = 0.0
 ```
 
 ---
 
-### Use Case 2: Auto-Session Detection
+#### 2.5 Recommendation Service (`recommendation.py`)
 
-**Scenario:** Ingesting a new conversation that's related to an existing project.
+**Purpose:** Find relevant context before starting a new conversation.
+
+**Scoring Algorithm:**
 
 ```
-POST /api/v1/ingest
-{
-  "source": "cursor",
-  "messages": [{"role": "user", "content": "Help with React product catalog..."}],
-  "auto_link_session": true
-}
-
-Symmetry automatically:
-1. Generates embedding for new conversation
-2. Searches existing sessions by similarity
-3. Finds "E-commerce Project" with 96% match
-4. Auto-links (confidence > 85%)
-
-Response:
-{
-  "conversation_id": "conv-456",
-  "session_suggestion": {
-    "suggested_session": { "name": "E-commerce Project" },
-    "confidence": 0.96,
-    "auto_linked": true,
-    "reason": "high_confidence"
-  },
-  "linked_session_id": "session-123"
-}
+Final Score = (Relevance × 0.60) + (Recency × 0.25) + (Quality × 0.15)
 ```
 
-**Confidence Rules:**
-| Confidence | Action |
-|------------|--------|
-| > 85% | Auto-link (if `auto_link_session: true`) |
-| 70-85% | Suggest to user for confirmation |
-| < 70% | Keep standalone |
+**Relevance Score (60%):**
+```
+Base: Cosine similarity from embedding search
+Bonus: +0.1 per matching topic
+Bonus: +0.05 per matching entity
+```
 
-**`auto_link_session` Parameter:**
+**Recency Score (25%):**
+```
+< 24 hours ago:  1.0
+1-7 days ago:    0.8 → 0.5 (linear decay)
+7-30 days ago:   0.5 → 0.1 (linear decay)
+> 30 days ago:   0.0
+```
 
-| Value | Suggestions | Auto-Link |
-|-------|-------------|-----------|
-| `true` (default) | ✅ Always returned | ✅ If confidence > 85% |
-| `false` | ✅ Always returned | ❌ Never (user must confirm) |
+**Quality Score (15%):**
+```
+Has summary:     +0.3
+Has topics:      +0.2
+Has entities:    +0.2
+Messages ≥ 10:   +0.3
+Has decisions:   +0.2 (from Neo4j)
+```
 
-```json
-// Example: Get suggestions but don't auto-link
-POST /api/v1/ingest
-{
-  "source": "chatgpt",
-  "messages": [...],
-  "auto_link_session": false  // Manual mode
-}
+**Auto-Selection:**
 
-// Response always includes suggestions:
-{
-  "conversation_id": "conv-789",
-  "linked_session_id": null,  // NOT auto-linked
-  "session_suggestion": {
-    "suggested_session": { "name": "E-commerce Project" },
-    "confidence": 0.92,
-    "auto_linked": false,     // Reflects that it wasn't linked
-    "all_suggestions": [...]  // Other options available
-  }
-}
+A recommendation is auto-selected if:
+1. Score > 0.85 **AND**
+2. Margin > 0.20 (gap from second-best)
 
-// User can then manually confirm:
-POST /api/v1/sessions/confirm-link
-{
-  "conversation_id": "conv-789",
-  "session_id": "session-123"
-}
+```python
+if top.score > 0.85 and (top.score - second.score) > 0.20:
+    auto_select = top
+```
+
+**Knowledge Graph Expansion:**
+
+The recommendation service uses Neo4j to expand queries:
+
+```
+User Query: "implement caching"
+         │
+         ▼
+    Extract Keywords: ["caching"]
+         │
+         ▼
+    Neo4j Graph Traversal:
+    caching → Redis → session storage → TTL
+         │
+         ▼
+    Expanded Search Terms: ["caching", "Redis", "session storage", "TTL"]
 ```
 
 ---
 
-### Use Case 3: Query-Based Retrieval
+#### 2.6 Summarization Service (`summarization.py`)
 
-**Scenario:** Find what you decided about a specific topic.
+**Purpose:** Generate human-readable summaries from retrieved context.
 
+**Input:**
+- Query (what user is asking about)
+- Chunks (relevant conversation snippets)
+- Decisions (from Neo4j)
+- Facts (from Neo4j)
+- Entities (from Neo4j)
+
+**Output:**
 ```
-POST /api/v1/retrieve
-{
-  "mode": "query",
-  "query": "what database did I choose for my project?"
-}
-
-Response:
-{
-  "summary": "You chose PostgreSQL because you need relational data 
-              for products, orders, and users. Prisma was recommended 
-              as the ORM.",
-  "context_prompt": "[Ready-to-inject context...]",
-  "chunks_found": 2
-}
+"You chose PostgreSQL for your e-commerce project because you need 
+relational data for products, orders, and users. Prisma was recommended 
+as the ORM. You're using React for the frontend and considering Stripe 
+for payments."
 ```
 
 ---
 
-### Use Case 4: Get Recommendations
+### 3. Data Layer
 
-**Scenario:** Find relevant context before starting a new conversation.
+**Location:** `app/db/`
 
-```
-POST /api/v1/recommend
-{ "query": "implement Stripe payments" }
+#### 3.1 PostgreSQL Client (`postgres.py`)
 
-Response:
-{
-  "recommendations": [
-    {
-      "type": "session",
-      "name": "E-commerce Project",
-      "score": { "relevance": 0.89, "recency": 1.0, "final": 0.88 },
-      "auto_select": true
-    },
-    {
-      "type": "conversation", 
-      "name": "Payment integration discussion",
-      "score": { "final": 0.72 }
-    }
-  ],
-  "auto_selected": { "name": "E-commerce Project" },
-  "query_analysis": { "topics": ["payments", "Stripe"] }
-}
-```
+**Purpose:** Handle all Memory Layer operations.
 
----
+**Key Operations:**
 
-### Use Case 5: Confirm Session Suggestions
+| Category | Methods |
+|----------|---------|
+| **Users** | `create_user()`, `get_user_by_api_key()`, `get_user_by_email()` |
+| **Sessions** | `create_session()`, `get_session()`, `list_sessions()`, `search_sessions_by_embedding()` |
+| **Conversations** | `create_conversation()`, `get_conversation()`, `link_conversation_to_session()` |
+| **Chunks** | `create_chunk()`, `search_chunks()`, `search_chunks_hybrid()` |
+| **Suggestions** | `create_session_suggestion()`, `get_session_suggestion_stats()` |
 
-**Scenario:** Symmetry suggests a session, but you want to create a new one.
+**Vector Search with pgvector:**
 
-```
-# Option A: Accept suggestion
-POST /api/v1/sessions/confirm-link
-{
-  "conversation_id": "conv-999",
-  "action": "accept",
-  "session_id": "session-456"
-}
-
-# Option B: Reject (keep standalone)
-POST /api/v1/sessions/confirm-link
-{
-  "conversation_id": "conv-999",
-  "action": "reject"
-}
-
-# Option C: Create new session
-POST /api/v1/sessions/confirm-link
-{
-  "conversation_id": "conv-999",
-  "action": "create_new",
-  "new_session_name": "Client X Project"
-}
+```sql
+-- Cosine similarity search
+SELECT content, 1 - (embedding <=> query_embedding) as similarity
+FROM chunks
+WHERE user_id = $user_id
+  AND 1 - (embedding <=> query_embedding) > 0.5
+ORDER BY embedding <=> query_embedding
+LIMIT 5
 ```
 
----
+**Hybrid Search (Semantic + Keyword):**
 
-### Use Case 6: Full Context Export
-
-**Scenario:** Get ALL your context for a fresh start.
-
-```
-POST /api/v1/retrieve
-{ "mode": "full", "limit": 20 }
-
-Response:
-{
-  "summary": "Complete summary of all conversations...",
-  "context_prompt": "
-    [CONTEXT FROM ALL CONVERSATIONS]
+```python
+async def search_chunks_hybrid(user_id, embedding, keywords, semantic_weight=0.7):
+    """
+    Combines:
+    - Semantic similarity (70%): Vector cosine distance
+    - Keyword matching (30%): ILIKE text search
     
-    ### ChatGPT conversations...
-    ### Claude conversations...
-    ### Cursor conversations...
-    
-    ## All Decisions Made:
-    - PostgreSQL for database
-    - React + Node.js stack
-    - Stripe for payments
-    
-    [END CONTEXT]
-  ",
-  "decisions": [...],
-  "facts": [...],
-  "entities": ["React", "PostgreSQL", "Stripe"]
-}
+    Helps catch cases where:
+    - Semantic search misses due to vocabulary mismatch
+    - Keywords catch what embeddings miss
+    """
+```
+
+**Tiered Confidence Results:**
+
+```python
+async def search_chunks_tiered(user_id, embedding, limit=10):
+    """
+    Returns results in confidence tiers:
+    - High (≥0.7): Very relevant
+    - Medium (0.5-0.7): Possibly relevant  
+    - Low (0.3-0.5): Might be related
+    """
 ```
 
 ---
 
-## 🔬 Deep Dive: How It Works
+#### 3.2 Neo4j Client (`neo4j.py`)
 
-### Ingestion Pipeline (POST /ingest)
+**Purpose:** Handle all Knowledge Layer operations.
 
-When you call `/ingest`, here's the complete processing pipeline:
+**Graph Structure:**
+
+```
+         (User)
+           │
+     ┌─────┴─────┬──────────┐
+     │           │          │
+   CHOSE     REJECTED   CONSIDERING
+     │           │          │
+     ▼           ▼          ▼
+(PostgreSQL) (MongoDB)   (Redis)
+     │
+   USED_FOR
+     │
+     ▼
+(E-commerce Project)
+     │
+  ┌──┴──┐
+USES   INTEGRATES
+  │       │
+  ▼       ▼
+(React) (Stripe)
+```
+
+**Key Operations:**
+
+| Category | Methods |
+|----------|---------|
+| **Entities** | `create_entity()`, `get_entities()`, `find_related_entities()` |
+| **Relationships** | `create_relationship()`, `get_decisions()`, `get_exploring()`, `get_rejected()` |
+| **Facts** | `create_temporal_fact()`, `get_current_facts()` |
+| **Validation** | `detect_contradictions()`, `verify_relationship()`, `get_unverified_knowledge()` |
+
+**Relationship Properties:**
+
+```python
+{
+    "id": "uuid",
+    "created_at": "2026-01-19T10:30:00Z",
+    "confidence": 0.9,           # 0.0-1.0
+    "status": "decided",         # decided, exploring, rejected
+    "verified": False,           # User hasn't verified yet
+    "attributed_to": "user",     # user, colleague, article, ai_suggestion
+    "temporal": "current",       # current, past, future
+    "conversation_id": "...",    # Source conversation
+    "source": "chatgpt"          # Source platform
+}
+```
+
+**Contradiction Detection:**
+
+```cypher
+// Find cases where user chose something, then chose something else in same category
+MATCH (u:User {user_id: $user_id})-[r1:CHOSE]->(t1)
+MATCH (u)-[r2:CHOSE]->(t2)
+WHERE t1 <> t2
+AND labels(t1) = labels(t2)  // Same category (both databases, both frameworks, etc.)
+AND r1.created_at < r2.created_at
+RETURN t1.name as old_decision, t2.name as new_decision, labels(t1)[0] as category
+```
+
+---
+
+## 🔄 Core Pipelines
+
+### Ingestion Pipeline
+
+**Endpoint:** `POST /api/v1/ingest`
+
+**Complete Flow:**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         INGESTION PIPELINE                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-INPUT: Conversation from ChatGPT/Claude/Cursor
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ {                                                                            │
-│   "source": "chatgpt",                                                       │
-│   "messages": [                                                              │
-│     {"role": "user", "content": "I want to build an e-commerce site..."},   │
-│     {"role": "assistant", "content": "Great! Let's use React and..."}       │
-│   ]                                                                          │
-│ }                                                                            │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Step 1: Text Preparation
-
-```
-Raw Messages → Concatenated Text
-─────────────────────────────────
-
-USER: I want to build an e-commerce site with React
-ASSISTANT: Great choice! For the database, I recommend PostgreSQL...
-USER: What about payments?
-ASSISTANT: Stripe is excellent for payments...
-
-         ↓ Concatenate with role markers
-         
-"USER: I want to build an e-commerce site with React
-ASSISTANT: Great choice! For the database, I recommend PostgreSQL...
-USER: What about payments?
-ASSISTANT: Stripe is excellent for payments..."
-```
-
-#### Step 2: Chunking (Text Splitting)
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    CHUNKING STRATEGY                             │
-├─────────────────────────────────────────────────────────────────┤
-│  Technique: RecursiveCharacterTextSplitter (LangChain)          │
-│  Chunk Size: 500 characters                                      │
-│  Overlap: 50 characters (10%)                                    │
-└─────────────────────────────────────────────────────────────────┘
-
-Full Text (2000 chars)
-┌────────────────────────────────────────────────────────────────┐
-│ USER: I want to build... ASSISTANT: Great choice... USER: What │
-│ about payments? ASSISTANT: Stripe is excellent... USER: How do │
-│ I structure the database? ASSISTANT: For e-commerce, you need  │
-│ tables for: products, orders, users, cart_items...             │
-└────────────────────────────────────────────────────────────────┘
-                              ↓
-                         Split into chunks
-                              ↓
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│  Chunk 0    │  │  Chunk 1    │  │  Chunk 2    │  │  Chunk 3    │
-│  (500 ch)   │  │  (500 ch)   │  │  (500 ch)   │  │  (500 ch)   │
-│             │  │             │  │             │  │             │
-│ "USER: I    │  │ "...choice! │  │ "...Stripe  │  │ "...tables  │
-│ want to     │  │ For the     │  │ is excel-   │  │ for: prod-  │
-│ build..."   │  │ database.." │  │ lent..."    │  │ ucts..."    │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │                │
-       └────────────────┴────────────────┴────────────────┘
+INPUT:
+{
+  "source": "chatgpt",
+  "messages": [
+    {"role": "user", "content": "I want to build an e-commerce site..."},
+    {"role": "assistant", "content": "Great! Let's use React and..."}
+  ],
+  "auto_link_session": true
+}
                               │
-                    50 char OVERLAP between chunks
-                    (ensures context isn't lost at boundaries)
-```
-
-**Why Chunking?**
-- Embeddings have token limits (~8K tokens)
-- Smaller chunks = more precise semantic search
-- Overlap ensures we don't cut important context mid-sentence
-
-#### Step 3: Embedding Generation
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    EMBEDDING PROCESS                             │
-├─────────────────────────────────────────────────────────────────┤
-│  Model: text-embedding-3-large (Azure OpenAI)                   │
-│  Dimensions: 3072                                                │
-│  Output: Dense vector representing semantic meaning              │
-└─────────────────────────────────────────────────────────────────┘
-
-Chunk 0: "USER: I want to build an e-commerce site with React..."
-                              ↓
-                    Azure OpenAI Embedding API
-                              ↓
-Vector: [0.0234, -0.0891, 0.1456, ..., 0.0023]  (3072 floats)
-         │
-         └── This vector CAPTURES THE MEANING of the text
-             Similar texts → Similar vectors → Close in vector space
-```
-
-**What the embedding captures:**
-```
-"e-commerce site with React" 
-    → Vector close to: "online store", "web shop", "React app"
-    → Vector far from: "machine learning", "cooking recipes"
-```
-
-#### Step 4: Conversation-Level Processing
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│              CONVERSATION SUMMARY & EMBEDDING                    │
-└─────────────────────────────────────────────────────────────────┘
-
-Full Conversation
-       ↓
-┌──────────────────────────────────────────────────────────────────┐
-│  LLM (GPT-4o-mini) generates:                                    │
-│                                                                  │
-│  Summary: "User is building an e-commerce website using React    │
-│           and Node.js. Chose PostgreSQL for database and Stripe  │
-│           for payments. Discussed database schema design."       │
-│                                                                  │
-│  Topics: ["e-commerce", "React", "PostgreSQL", "Stripe"]         │
-│                                                                  │
-│  Entities: ["React", "Node.js", "PostgreSQL", "Stripe"]          │
-└──────────────────────────────────────────────────────────────────┘
-       ↓
-Summary → Embedding API → Conversation Embedding [3072 floats]
-```
-
-#### Step 5: Session Auto-Detection
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                 SESSION MATCHING ALGORITHM                       │
-└─────────────────────────────────────────────────────────────────┘
-
-New Conversation Embedding
-       ↓
-┌──────────────────────────────────────────────────────────────────┐
-│  SELECT * FROM sessions                                          │
-│  WHERE 1 - (embedding <=> new_embedding) > 0.5  -- similarity    │
-│  ORDER BY embedding <=> new_embedding           -- closest first │
-│  LIMIT 5                                                         │
-└──────────────────────────────────────────────────────────────────┘
-       ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  Session                    │ Similarity │ Topics Match │ Final │
-├─────────────────────────────┼────────────┼──────────────┼───────┤
-│  E-commerce Project         │    0.92    │     3/4      │ 0.96  │
-│  React Learning             │    0.71    │     1/4      │ 0.73  │
-│  Personal Blog              │    0.45    │     0/4      │ 0.45  │
-└─────────────────────────────────────────────────────────────────┘
-       ↓
-Decision Logic:
-  IF top_score > 0.85 AND (top_score - second_score) > 0.15:
-      → AUTO-LINK (high confidence)
-  ELIF top_score > 0.70:
-      → SUGGEST (medium confidence)
-  ELSE:
-      → STANDALONE (no match)
-```
-
-#### Step 6: Knowledge Extraction (Neo4j)
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                 KNOWLEDGE EXTRACTION                             │
-├─────────────────────────────────────────────────────────────────┤
-│  LLM analyzes conversation and extracts structured knowledge    │
-└─────────────────────────────────────────────────────────────────┘
-
-Conversation Text
-       ↓
-   GPT-4o-mini with extraction prompt
-       ↓
-┌──────────────────────────────────────────────────────────────────┐
-│  ENTITIES:                                                       │
-│  ├── React (technology)                                          │
-│  ├── PostgreSQL (database)                                       │
-│  ├── Stripe (service)                                            │
-│  └── E-commerce Project (project)                                │
-│                                                                  │
-│  RELATIONSHIPS:                                                  │
-│  ├── User ──CHOSE──→ PostgreSQL                                  │
-│  ├── Project ──USES──→ React                                     │
-│  └── Project ──INTEGRATES──→ Stripe                              │
-│                                                                  │
-│  DECISIONS:                                                      │
-│  ├── "Use PostgreSQL" (reason: "need relational data")          │
-│  └── "Use Stripe" (reason: "best payment integration")          │
-│                                                                  │
-│  FACTS:                                                          │
-│  ├── "Project is an e-commerce website"                         │
-│  └── "Target launch: Q2 2026"                                    │
-└──────────────────────────────────────────────────────────────────┘
-       ↓
-   Store in Neo4j Graph
-       ↓
-         (User)
-           │
-     ┌─────┴─────┐
-     │           │
-   CHOSE      WORKS_ON
-     │           │
-     ▼           ▼
-(PostgreSQL)  (Project)
-                 │
-          ┌──────┼──────┐
-          │      │      │
-        USES   USES  INTEGRATES
-          │      │      │
-          ▼      ▼      ▼
-      (React) (Node.js) (Stripe)
-```
-
-#### Step 7: Final Storage
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    FINAL STORAGE                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-POSTGRESQL:
-┌─────────────────────────────────────────────────────────────────┐
-│ conversations                                                    │
-├─────────────────────────────────────────────────────────────────┤
-│ id: conv-123                                                     │
-│ user_id: user-456                                                │
-│ session_id: session-789 (if linked)                              │
-│ source: "chatgpt"                                                │
-│ raw_messages: [{role, content}, ...]                             │
-│ summary: "User building e-commerce..."                           │
-│ topics: ["e-commerce", "React", ...]                             │
-│ entities: ["React", "PostgreSQL", ...]                           │
-│ embedding: [0.023, -0.089, ...] (3072 dims)                      │
-│ created_at: 2026-01-17T10:30:00Z                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│ chunks                                                           │
-├─────────────────────────────────────────────────────────────────┤
-│ id: chunk-001          │ id: chunk-002         │ ...            │
-│ conversation_id: conv-123                                        │
-│ content: "USER: I want..." │ content: "...database" │            │
-│ embedding: [...]        │ embedding: [...]      │                │
-│ chunk_index: 0          │ chunk_index: 1        │                │
-└─────────────────────────────────────────────────────────────────┘
-
-NEO4J:
-┌─────────────────────────────────────────────────────────────────┐
-│ Nodes: Entity, Decision, Fact                                    │
-│ Relationships: CHOSE, USES, WORKS_ON, etc.                       │
-│ Properties: user_id, timestamp, reason, valid_from, valid_to     │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-### Retrieval Pipeline (POST /retrieve)
-
-The retrieve endpoint supports 4 modes, each optimized for different use cases:
-
-#### Mode 1: Query-Based Retrieval (`mode: "query"`)
-
-**Use Case:** Find specific information from past conversations.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    QUERY MODE RETRIEVAL                          │
-└─────────────────────────────────────────────────────────────────┘
-
-INPUT: { "mode": "query", "query": "what database did I choose?" }
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 1: Generate Query Embedding                                 │
-├──────────────────────────────────────────────────────────────────┤
-│ "what database did I choose?"                                    │
-│        ↓                                                         │
-│ text-embedding-3-large                                           │
-│        ↓                                                         │
-│ [0.0456, -0.0234, 0.1789, ...] (3072 dims)                      │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 2: Vector Similarity Search (pgvector)                      │
-├──────────────────────────────────────────────────────────────────┤
-│ SELECT content, 1 - (embedding <=> query_embedding) as score     │
-│ FROM chunks                                                      │
-│ WHERE user_id = $user_id                                         │
-│   AND 1 - (embedding <=> query_embedding) > 0.5                  │
-│ ORDER BY embedding <=> query_embedding                           │
-│ LIMIT 5                                                          │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ RESULTS:                                                         │
-├─────────────────────────────────────────────────────────────────┤
-│ 1. "For the database, I recommend PostgreSQL because..."  (0.91)│
-│ 2. "PostgreSQL is great for relational data like..."      (0.87)│
-│ 3. "You'll need tables for products, orders, users..."    (0.82)│
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 3: Knowledge Graph Query (Neo4j)                            │
-├──────────────────────────────────────────────────────────────────┤
-│ MATCH (u:User {id: $user_id})-[r:CHOSE]->(db)                   │
-│ WHERE db.type = 'database'                                       │
-│ RETURN db.name, r.reason, r.timestamp                            │
-│                                                                  │
-│ Result: PostgreSQL, "need relational data", 2026-01-17          │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 4: Generate Summary & Context Prompt                        │
-├──────────────────────────────────────────────────────────────────┤
-│ LLM combines chunks + knowledge into:                            │
-│                                                                  │
-│ summary: "You chose PostgreSQL for your e-commerce project       │
-│          because you need relational data for products,          │
-│          orders, and users. Prisma was recommended as ORM."      │
-│                                                                  │
-│ context_prompt: "[SYMMETRY CONTEXT]                              │
-│                  Decision: Chose PostgreSQL                      │
-│                  Reason: Relational data needs                   │
-│                  Related: products, orders, users tables         │
-│                  [END CONTEXT]"                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-#### Mode 2: Session Retrieval (`mode: "session"`)
-
-**Use Case:** Continue a project across different LLMs.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                   SESSION MODE RETRIEVAL                         │
-└─────────────────────────────────────────────────────────────────┘
-
-INPUT: { "mode": "session", "session_id": "session-789" }
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 1: Fetch All Conversations in Session                       │
-├──────────────────────────────────────────────────────────────────┤
-│ SELECT * FROM conversations                                      │
-│ WHERE session_id = $session_id AND user_id = $user_id           │
-│ ORDER BY created_at ASC                                          │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ CONVERSATIONS IN SESSION:                                        │
-├─────────────────────────────────────────────────────────────────┤
-│ 1. [chatgpt] 2026-01-15 - Initial project discussion            │
-│ 2. [claude]  2026-01-16 - Database schema design                │
-│ 3. [cursor]  2026-01-17 - Payment integration                   │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 2: Build Chronological Context                              │
-├──────────────────────────────────────────────────────────────────┤
-│ For each conversation:                                           │
-│   - Extract raw_messages                                         │
-│   - Format: [source] timestamp                                   │
-│   - Include full USER/ASSISTANT exchanges                        │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 3: Fetch Related Knowledge                                  │
-├──────────────────────────────────────────────────────────────────┤
-│ Neo4j: Get all decisions, facts, entities for this user         │
-│ that were created during this session's timeframe               │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-OUTPUT context_prompt:
-┌──────────────────────────────────────────────────────────────────┐
-│ [CONTEXT FROM PREVIOUS AI CONVERSATIONS - SYMMETRY]              │
-│                                                                  │
-│ ## Session: E-commerce Project                                   │
-│ Description: Building online store with React/Node/PostgreSQL   │
-│                                                                  │
-│ ## Conversation History (chronological):                         │
-│                                                                  │
-│ ### [chatgpt] - 2026-01-15                                      │
-│ **USER**: I want to build an e-commerce site...                 │
-│ **ASSISTANT**: Great! Let's start with the tech stack...        │
-│                                                                  │
-│ ### [claude] - 2026-01-16                                       │
-│ **USER**: Help me design the database schema...                 │
-│ **ASSISTANT**: For e-commerce, you need these tables...         │
-│                                                                  │
-│ ### [cursor] - 2026-01-17                                       │
-│ **USER**: Now let's integrate Stripe...                         │
-│ **ASSISTANT**: Here's how to set up Stripe...                   │
-│                                                                  │
-│ ## Key Decisions:                                                │
-│ - Chose PostgreSQL (Reason: relational data)                    │
-│ - Using Prisma ORM (Reason: type safety)                        │
-│ - Stripe for payments (Reason: best docs)                       │
-│                                                                  │
-│ ## Current Facts:                                                │
-│ - Project uses React + Node.js                                  │
-│ - Target: Q2 2026 launch                                        │
-│                                                                  │
-│ [END SYMMETRY CONTEXT]                                           │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-#### Mode 3: Conversation Retrieval (`mode: "conversation"`)
-
-**Use Case:** Get a specific conversation's full context.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                CONVERSATION MODE RETRIEVAL                       │
-└─────────────────────────────────────────────────────────────────┘
-
-INPUT: { "mode": "conversation", "conversation_id": "conv-123" }
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ Fetch single conversation with all raw_messages                  │
-│ Include: source, timestamp, full message history                 │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-OUTPUT: Complete conversation with summary and context_prompt
-```
-
-#### Mode 4: Full Retrieval (`mode: "full"`)
-
-**Use Case:** Get ALL your context for a completely fresh start.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     FULL MODE RETRIEVAL                          │
-└─────────────────────────────────────────────────────────────────┘
-
-INPUT: { "mode": "full", "limit": 20 }
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ Fetch ALL recent conversations (up to limit)                     │
-│ Fetch ALL decisions from Neo4j                                   │
-│ Fetch ALL facts from Neo4j                                       │
-│ Fetch ALL entities from Neo4j                                    │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-OUTPUT: Comprehensive context_prompt with everything
-```
-
----
-
-### Recommendation Pipeline (POST /recommend)
-
-The recommend endpoint helps users find relevant context BEFORE starting a new conversation.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                  RECOMMENDATION PIPELINE                         │
-└─────────────────────────────────────────────────────────────────┘
-
-INPUT: { "query": "implement Stripe payments" }
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 1: Query Analysis                                           │
-├──────────────────────────────────────────────────────────────────┤
-│ Extract topics: ["payments", "Stripe", "implementation"]         │
-│ Generate embedding: [0.0234, -0.0891, ...]                       │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 2: Search Sessions & Conversations                          │
-├──────────────────────────────────────────────────────────────────┤
-│ Sessions:                                                        │
-│   SELECT *, 1-(embedding <=> query) as similarity                │
-│   FROM sessions WHERE user_id = $user_id                         │
-│   ORDER BY similarity DESC LIMIT 10                              │
-│                                                                  │
-│ Standalone Conversations:                                        │
-│   SELECT *, 1-(embedding <=> query) as similarity                │
-│   FROM conversations                                             │
-│   WHERE user_id = $user_id AND session_id IS NULL               │
-│   ORDER BY similarity DESC LIMIT 10                              │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 3: Scoring Algorithm                                        │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│ Final Score = (Relevance × 0.60) + (Recency × 0.25) +           │
-│               (Quality × 0.15)                                   │
-│                                                                  │
-│ ┌─────────────────────────────────────────────────────────────┐ │
-│ │ RELEVANCE (60%)                                             │ │
-│ │ • Base: Cosine similarity from embedding search             │ │
-│ │ • Bonus: +0.1 per matching topic                            │ │
-│ │ • Bonus: +0.05 per matching entity                          │ │
-│ └─────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│ ┌─────────────────────────────────────────────────────────────┐ │
-│ │ RECENCY (25%)                                               │ │
-│ │ • < 24 hours ago: 1.0                                       │ │
-│ │ • 1-7 days ago: 0.8 - 0.5 (linear decay)                   │ │
-│ │ • 7-30 days ago: 0.5 - 0.1 (linear decay)                  │ │
-│ │ • > 30 days ago: 0.0                                        │ │
-│ └─────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│ ┌─────────────────────────────────────────────────────────────┐ │
-│ │ QUALITY (15%)                                               │ │
-│ │ • Has summary: +0.3                                         │ │
-│ │ • Has topics: +0.2                                          │ │
-│ │ • Has entities: +0.2                                        │ │
-│ │ • Message count ≥ 10: +0.3                                  │ │
-│ │ • Has decisions (Neo4j): +0.2                               │ │
-│ └─────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────┐
-│ STEP 4: Ranking & Auto-Selection                                 │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│ Ranked Results:                                                  │
-│ ┌─────────────────────────────────────────────────────────────┐ │
-│ │ Rank │ Type    │ Name              │ Score │ Auto-Select?  │ │
-│ ├──────┼─────────┼───────────────────┼───────┼───────────────┤ │
-│ │  1   │ session │ E-commerce Proj   │ 0.91  │ ✓ YES         │ │
-│ │  2   │ conv    │ Payment chat      │ 0.68  │ ✗ NO          │ │
-│ │  3   │ session │ React Learning    │ 0.52  │ ✗ NO          │ │
-│ └─────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│ Auto-Selection Rules:                                            │
-│ • Score > 0.85 AND                                              │
-│ • Margin > 0.20 (difference from #2)                            │
-│ • Result: "E-commerce Project" auto-selected (0.91 - 0.68 = 0.23)│
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-                              ↓
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: GENERATE SUMMARY                                                     │
+│                                                                              │
+│ LLM (GPT-4o-mini) analyzes conversation:                                    │
+│   → Summary: "User building e-commerce with React, chose PostgreSQL"        │
+│   → Topics: ["e-commerce", "React", "PostgreSQL"]                           │
+│   → Entities: ["React", "PostgreSQL", "Stripe"]                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: GENERATE CONVERSATION EMBEDDING                                      │
+│                                                                              │
+│ Summary text → text-embedding-3-large → [3072-dim vector]                   │
+│ This embedding represents the ENTIRE conversation's meaning                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: SESSION DETECTION                                                    │
+│                                                                              │
+│ Search existing sessions by embedding similarity:                            │
+│                                                                              │
+│   E-commerce Project    │ 0.96 similarity │ AUTO-LINK ✓                     │
+│   React Learning        │ 0.73 similarity │                                  │
+│   Personal Blog         │ 0.45 similarity │                                  │
+│                                                                              │
+│ Decision: Auto-link to "E-commerce Project" (0.96 > 0.85 threshold)         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: STORE CONVERSATION                                                   │
+│                                                                              │
+│ INSERT INTO conversations (user_id, source, raw_messages, session_id,       │
+│                            summary, topics, entities, embedding)            │
+│ VALUES (...)                                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 5: CHUNK AND EMBED                                                      │
+│                                                                              │
+│ Semantic Chunking:                                                           │
+│   "USER: I want to build..."  →  Chunk 0 (preserves meaning)                │
+│   "ASSISTANT: Great! Let's..." →  Chunk 1 (keeps Q&A context)               │
+│                                                                              │
+│ Each chunk → Embedding API → Store in chunks table                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 6: EXTRACT KNOWLEDGE (Neo4j)                                            │
+│                                                                              │
+│ LLM extracts structured knowledge:                                           │
+│                                                                              │
+│   ENTITIES:                                                                  │
+│     • PostgreSQL (Tool)                                                      │
+│     • React (Technology)                                                     │
+│     • E-commerce Project (Project)                                           │
+│                                                                              │
+│   RELATIONSHIPS:                                                             │
+│     • User ──CHOSE──→ PostgreSQL (confidence: 0.95)                         │
+│     • User ──CHOSE──→ React (confidence: 0.90)                              │
+│     • Project ──USES──→ PostgreSQL                                          │
+│                                                                              │
+│   FACTS:                                                                     │
+│     • User WORKS_ON E-commerce Project (temporal: current)                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 7: UPDATE SESSION EMBEDDING                                             │
+│                                                                              │
+│ Recalculate session embedding as average of all conversation embeddings     │
+│ This improves future session matching accuracy                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
 OUTPUT:
 {
-  "recommendations": [
-    {
-      "type": "session",
-      "id": "session-789",
-      "name": "E-commerce Project",
-      "description": "Building online store...",
-      "score": {
-        "relevance": 0.89,
-        "recency": 1.0,
-        "quality": 0.85,
-        "final": 0.91
-      },
-      "auto_select": true,
-      "match_reasons": ["topic:payments", "entity:Stripe"]
-    },
-    ...
-  ],
-  "auto_selected": {
-    "type": "session",
-    "id": "session-789",
-    "name": "E-commerce Project"
-  },
-  "query_analysis": {
-    "topics": ["payments", "Stripe"],
-    "entities": ["Stripe"]
+  "conversation_id": "conv-123",
+  "chunks_created": 4,
+  "entities_extracted": 3,
+  "relationships_created": 3,
+  "linked_session_id": "session-456",
+  "session_suggestion": {
+    "suggested_session": {"name": "E-commerce Project"},
+    "confidence": 0.96,
+    "auto_linked": true
   }
+}
+```
+
+**Append Mode:**
+
+When updating an existing conversation:
+
+```python
+# Option 1: Send ALL messages (default)
+{
+  "conversation_id": "conv-123",
+  "messages": [old_msg1, old_msg2, new_msg3, new_msg4],  # ALL messages
+  "append_only": false  # System compares to find new ones
+}
+
+# Option 2: Send ONLY new messages
+{
+  "conversation_id": "conv-123", 
+  "messages": [new_msg3, new_msg4],  # ONLY new messages
+  "append_only": true  # System appends directly
 }
 ```
 
 ---
 
-### Vector Similarity: How It Works
+### Retrieval Pipeline
+
+**Endpoint:** `POST /api/v1/retrieve`
+
+**Four Modes:**
+
+| Mode | Use Case | Required Params |
+|------|----------|-----------------|
+| `query` | Find specific info | `query` |
+| `session` | Continue a project | `session_id` |
+| `conversation` | Continue specific chat | `conversation_id` |
+| `full` | Get ALL context | - |
+
+**Query Mode Flow:**
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                 COSINE SIMILARITY EXPLAINED                      │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     QUERY MODE RETRIEVAL                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
 
-3072-Dimensional Vector Space (simplified to 2D):
+INPUT: { "mode": "query", "query": "what database did I choose?" }
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: EXTRACT KEYWORDS                                                     │
+│                                                                              │
+│ Query: "what database did I choose?"                                        │
+│ Keywords: ["database", "choose"]                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: KNOWLEDGE GRAPH EXPANSION (Neo4j)                                    │
+│                                                                              │
+│ Find related entities from user's graph:                                    │
+│   "database" → PostgreSQL → ACID, relational, Prisma                        │
+│                                                                              │
+│ Expanded terms: ["database", "choose", "PostgreSQL", "ACID", "Prisma"]      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: GENERATE QUERY EMBEDDING                                             │
+│                                                                              │
+│ "what database did I choose?" → [3072-dim vector]                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: HYBRID SEARCH                                                        │
+│                                                                              │
+│ Combines:                                                                    │
+│   • Semantic: Vector similarity (70% weight)                                │
+│   • Keyword: Text matching on expanded terms (30% weight)                   │
+│                                                                              │
+│ Results:                                                                     │
+│   1. "I recommend PostgreSQL because..."  (combined: 0.91)                  │
+│   2. "PostgreSQL is great for relational..."  (combined: 0.87)              │
+│   3. "You'll need tables for products..."  (combined: 0.82)                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 5: FETCH KNOWLEDGE (Neo4j)                                              │
+│                                                                              │
+│ Decisions: [PostgreSQL (CHOSE, confidence: 0.95)]                           │
+│ Facts: [User WORKS_ON E-commerce Project]                                   │
+│ Entities: [PostgreSQL, React, Stripe]                                       │
+│ Contradictions: [] (none detected)                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 6: BUILD CONTEXT PROMPT                                                 │
+│                                                                              │
+│ [CONTEXT FROM PREVIOUS AI CONVERSATIONS - PROVIDED BY SYMMETRY]             │
+│                                                                              │
+│ ## ✅ Confirmed Decisions:                                                   │
+│ - PostgreSQL (Reason: ACID compliance, relational data needs)               │
+│                                                                              │
+│ ## Current Facts:                                                            │
+│ - User WORKS_ON E-commerce Project                                          │
+│                                                                              │
+│ ## Relevant Past Discussions:                                                │
+│ - "I recommend PostgreSQL because you need relational data..."              │
+│                                                                              │
+│ [END SYMMETRY CONTEXT]                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 7: GENERATE SUMMARY                                                     │
+│                                                                              │
+│ LLM creates human-readable summary:                                          │
+│ "You chose PostgreSQL for your e-commerce project because you need          │
+│  relational data for products, orders, and users."                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+OUTPUT:
+{
+  "summary": "You chose PostgreSQL for your e-commerce project...",
+  "context_prompt": "[CONTEXT FROM PREVIOUS AI CONVERSATIONS...]",
+  "decisions": [{"content": "PostgreSQL", "reason": "ACID compliance"}],
+  "facts": [{"subject": "User", "predicate": "WORKS_ON", "object": "E-commerce"}],
+  "entities": ["PostgreSQL", "React", "Stripe"],
+  "chunks_found": 3
+}
+```
 
+**Session Mode:**
+
+Returns ALL conversations in a session in chronological order:
+
+```
+[CONTEXT FROM PREVIOUS AI CONVERSATIONS - PROVIDED BY SYMMETRY]
+
+## Session: E-commerce Project
+Description: Building online store with React/Node/PostgreSQL
+
+## Complete Session History (chronological):
+
+### [chatgpt] - 2026-01-15
+**USER**: I want to build an e-commerce site...
+**ASSISTANT**: Great! Let's start with the tech stack...
+
+### [claude] - 2026-01-16
+**USER**: Help me design the database schema...
+**ASSISTANT**: For e-commerce, you need these tables...
+
+### [cursor] - 2026-01-17
+**USER**: Now let's integrate Stripe...
+**ASSISTANT**: Here's how to set up Stripe...
+
+## ✅ Confirmed Decisions:
+- PostgreSQL (Reason: relational data needs)
+- React (Reason: component-based UI)
+- Stripe (Reason: best payment docs)
+
+[END SYMMETRY CONTEXT]
+```
+
+---
+
+### Recommendation Pipeline
+
+**Endpoint:** `POST /api/v1/recommend`
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     RECOMMENDATION PIPELINE                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+INPUT: { "query": "implement Stripe payments" }
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: ANALYZE QUERY                                                        │
+│                                                                              │
+│ Extract topics: ["payments", "Stripe", "implementation"]                    │
+│ Extract entities: ["Stripe"]                                                │
+│ Generate embedding: [3072-dim vector]                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: KNOWLEDGE GRAPH EXPANSION                                            │
+│                                                                              │
+│ Neo4j traversal from "Stripe", "payments":                                  │
+│   Stripe → E-commerce Project → PostgreSQL → products table                 │
+│                                                                              │
+│ Expanded entities: ["Stripe", "E-commerce Project", "checkout"]             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: SEARCH SESSIONS & CONVERSATIONS                                      │
+│                                                                              │
+│ Sessions (by embedding similarity):                                          │
+│   E-commerce Project │ similarity: 0.89                                     │
+│   React Learning     │ similarity: 0.52                                     │
+│                                                                              │
+│ Standalone Conversations (not in sessions):                                  │
+│   Payment discussion │ similarity: 0.68                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: SCORE AND RANK                                                       │
+│                                                                              │
+│ For each candidate:                                                          │
+│   Relevance = similarity + topic_bonus + entity_bonus                       │
+│   Recency = time_decay_function(last_activity)                              │
+│   Quality = has_summary + has_topics + message_count                        │
+│                                                                              │
+│   Final = (Relevance × 0.60) + (Recency × 0.25) + (Quality × 0.15)         │
+│                                                                              │
+│ Results:                                                                     │
+│   E-commerce Project │ final: 0.91 │ AUTO-SELECT ✓                          │
+│   Payment discussion │ final: 0.68 │                                        │
+│   React Learning     │ final: 0.52 │                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+OUTPUT:
+{
+  "recommendations": [
+    {
+      "type": "session",
+      "name": "E-commerce Project",
+      "score": {"relevance": 0.89, "recency": 1.0, "quality": 0.85, "final": 0.91},
+      "auto_select": true
+    },
+    ...
+  ],
+  "auto_selected": {"type": "session", "name": "E-commerce Project"},
+  "query_analysis": {"topics": ["payments", "Stripe"], "entities": ["Stripe"]}
+}
+```
+
+---
+
+## 🧠 Key Algorithms & Techniques
+
+### 1. Vector Similarity Search
+
+**Cosine Similarity:**
+
+```
                     ↑ Dimension 2
                     │
                     │     * "PostgreSQL database"
@@ -988,261 +1048,103 @@ OUTPUT:
 Cosine Similarity = cos(θ)
   - θ = 0°   → similarity = 1.0 (identical meaning)
   - θ = 90°  → similarity = 0.0 (unrelated)
-  - θ = 180° → similarity = -1.0 (opposite meaning)
-
-pgvector operator: <=>  (cosine distance = 1 - similarity)
 ```
 
-### IVFFlat Index: Fast Search
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    IVFFlat INDEX                                 │
-└─────────────────────────────────────────────────────────────────┘
-
-Without Index: Compare query to ALL vectors (slow)
-┌─────────────────────────────────────────────────────────────────┐
-│ Query → Compare with 100,000 vectors → O(n) = SLOW              │
-└─────────────────────────────────────────────────────────────────┘
-
-With IVFFlat: Vectors grouped into clusters
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                  │
-│    Cluster 1          Cluster 2          Cluster 3              │
-│   (Tech/Code)        (Business)         (Personal)              │
-│   ┌─────────┐        ┌─────────┐        ┌─────────┐            │
-│   │ * * *   │        │  * *    │        │   *     │            │
-│   │  * * *  │        │ * * *   │        │  * *    │            │
-│   │   * *   │        │  * *    │        │ * * *   │            │
-│   └─────────┘        └─────────┘        └─────────┘            │
-│        ↑                                                         │
-│        │                                                         │
-│   Query lands here                                               │
-│   → Only search Cluster 1                                        │
-│   → O(n/k) = FAST                                               │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-
-lists = 100 → 100 clusters
-Search probes nearest clusters only
+**pgvector Operator:**
+```sql
+-- <=> is cosine distance (1 - similarity)
+SELECT 1 - (embedding <=> query_embedding) as similarity
+FROM chunks
+ORDER BY embedding <=> query_embedding
 ```
 
----
+### 2. IVFFlat Index
 
-### Complete User Journey Example
+**Problem:** Comparing query to ALL vectors is O(n) - slow!
+
+**Solution:** Cluster vectors, only search relevant clusters:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    COMPLETE USER JOURNEY                         │
-└─────────────────────────────────────────────────────────────────┘
+Without Index:
+  Query → Compare with 100,000 vectors → O(n) = SLOW
 
-DAY 1: User chats with ChatGPT
-────────────────────────────────
-User: "I want to build an e-commerce site"
-ChatGPT: "Great! Use React and PostgreSQL..."
+With IVFFlat (100 clusters):
+  Query → Find nearest cluster → Search ~1,000 vectors → O(n/k) = FAST
 
-       ↓ Client calls POST /ingest
-       
-Symmetry:
-  1. Chunks conversation → 3 chunks
-  2. Embeds chunks → 3 vectors stored
-  3. Generates summary → "E-commerce project with React/PostgreSQL"
-  4. Embeds summary → conversation vector
-  5. No matching session → creates "E-commerce Project" session
-  6. Extracts knowledge → (User)-[CHOSE]->(PostgreSQL)
-  7. Returns: { conversation_id, session_id, summary }
+CREATE INDEX ON chunks USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
+```
 
+### 3. Semantic-Aware Chunking
 
-DAY 2: User switches to Claude
-────────────────────────────────
-User opens Claude, wants to continue project
+**Key Patterns Protected from Splitting:**
 
-       ↓ Client calls POST /recommend
-       
-Symmetry:
-  1. User types "continue e-commerce"
-  2. Embeds query
-  3. Searches sessions → "E-commerce Project" (0.94 similarity)
-  4. Returns: { auto_selected: "E-commerce Project" }
+```python
+# Negations (CRITICAL)
+"NOT going to", "won't use", "decided against"
 
-       ↓ Client calls POST /retrieve (session mode)
-       
-Symmetry:
-  1. Fetches all conversations in session
-  2. Builds chronological context_prompt
-  3. Includes decisions, facts from Neo4j
-  4. Returns: { context_prompt: "[Full history...]" }
+# Decisions with reasons
+"because", "therefore", "the reason is"
 
-       ↓ Client injects context_prompt into Claude
-       
-Claude now has FULL context from ChatGPT conversation!
+# Comparisons
+"better than", "prefer X over", "instead of"
 
-User: "What about the payment system?"
-Claude: "Based on your PostgreSQL choice, Stripe integrates well..."
+# Code blocks
+```code``` markers, inline `code`
+
+# Lists
+"first", "second", "1.", "2."
+```
+
+### 4. Session Detection Algorithm
+
+```python
+def detect_session(conversation_embedding, user_sessions):
+    # 1. Vector similarity search
+    similar_sessions = search_by_embedding(conversation_embedding)
+    
+    # 2. Add recency boost
+    for session in similar_sessions:
+        if session.last_activity < 24_hours_ago:
+            session.score += 0.1 * (1 - hours_ago / 24)
+    
+    # 3. Apply decision rules
+    top = similar_sessions[0]
+    second = similar_sessions[1] if len > 1 else None
+    
+    if top.score > 0.85 and (not second or top.score - second.score > 0.15):
+        return AutoLink(top)
+    elif top.score > 0.70:
+        return Suggest(top)
+    else:
+        return Standalone()
+```
+
+### 5. Knowledge Graph Expansion
+
+```cypher
+// Find entities related to search terms
+UNWIND $search_terms AS term
+MATCH (start)
+WHERE start.user_id = $user_id
+AND toLower(start.name) CONTAINS toLower(term)
+
+// Traverse 1-2 hops to find related entities
+MATCH path = (start)-[*1..2]-(related)
+WHERE related.user_id = $user_id
+
+RETURN DISTINCT related.name
+ORDER BY length(path) ASC, COUNT(*) DESC
+LIMIT 10
 ```
 
 ---
 
-### Storage Summary
-
-| Data | Storage | Purpose |
-|------|---------|---------|
-| Raw messages | PostgreSQL `conversations.raw_messages` | Original conversation |
-| Chunks | PostgreSQL `chunks.content` | Granular semantic search |
-| Chunk embeddings | PostgreSQL `chunks.embedding` | Vector similarity search |
-| Conversation embedding | PostgreSQL `conversations.embedding` | Session matching |
-| Summary | PostgreSQL `conversations.summary` | Quick overview |
-| Topics/Entities | PostgreSQL arrays | Fast filtering |
-| Session info | PostgreSQL `sessions` | Group conversations |
-| Entities | Neo4j nodes | Knowledge graph |
-| Relationships | Neo4j edges | Entity connections |
-| Decisions | Neo4j `CHOSE/DECIDED` | Track choices with reasons |
-| Facts | Neo4j properties | Temporal knowledge |
-
----
-
-## 🏗️ Architecture
-
-### System Overview
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         SYMMETRY                                 │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐           │
-│   │ ChatGPT │  │ Claude  │  │ Cursor  │  │  Other  │           │
-│   └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘           │
-│        └────────────┴────────────┴────────────┘                 │
-│                          │                                       │
-│                          ▼                                       │
-│               ┌─────────────────────┐                           │
-│               │    Symmetry API     │                           │
-│               │     (FastAPI)       │                           │
-│               └──────────┬──────────┘                           │
-│                          │                                       │
-│            ┌─────────────┴─────────────┐                        │
-│            ▼                           ▼                        │
-│   ┌─────────────────┐       ┌─────────────────┐                │
-│   │  MEMORY LAYER   │       │ KNOWLEDGE LAYER │                │
-│   │                 │       │                 │                │
-│   │  PostgreSQL +   │       │     Neo4j       │                │
-│   │  pgvector       │       │  (Optional)     │                │
-│   │                 │       │                 │                │
-│   │ • Conversations │       │ • Entities      │                │
-│   │ • Chunks        │       │ • Relationships │                │
-│   │ • Sessions      │       │ • Facts         │                │
-│   │ • Embeddings    │       │ • Decisions     │                │
-│   └─────────────────┘       └─────────────────┘                │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Component Layers
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        API LAYER                                 │
-├─────────────────────────────────────────────────────────────────┤
-│  /ingest     /retrieve    /recommend    /sessions    /users     │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      SERVICE LAYER                               │
-├─────────────────────────────────────────────────────────────────┤
-│  SessionService      RecommendationService    EmbeddingService  │
-│  ExtractionService   ChunkingService          SummarizationSvc  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       DATA LAYER                                 │
-├─────────────────────────────────────────────────────────────────┤
-│           PostgresDB                    Neo4jDB                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow: Ingest
-
-```
-POST /ingest
-     │
-     ▼
-┌────────────────────┐
-│ Generate Summary   │ ──→ LLM extracts summary, topics, entities
-└────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Generate Embedding │ ──→ text-embedding-3-large (3072 dims)
-└────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Session Detection  │ ──→ Search similar sessions, auto-link if >85%
-└────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Store Conversation │ ──→ PostgreSQL with metadata
-└────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Chunk & Embed      │ ──→ Split text, generate chunk embeddings
-└────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Extract Knowledge  │ ──→ Neo4j: entities, relationships, facts
-└────────────────────┘
-     │
-     ▼
-Response: { conversation_id, session_suggestion, ... }
-```
-
-### Data Flow: Retrieve
-
-```
-POST /retrieve
-     │
-     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      MODE SELECTION                              │
-├─────────────────────────────────────────────────────────────────┤
-│  "query"        → Semantic search chunks                        │
-│  "session"      → Get all conversations in session              │
-│  "conversation" → Get specific conversation                     │
-│  "full"         → Get all user's context                        │
-└─────────────────────────────────────────────────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Fetch Knowledge    │ ──→ Neo4j: decisions, facts, entities
-└────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Build Context      │ ──→ Generate context_prompt for LLM injection
-└────────────────────┘
-     │
-     ▼
-┌────────────────────┐
-│ Generate Summary   │ ──→ Human-readable summary
-└────────────────────┘
-     │
-     ▼
-Response: { summary, context_prompt, decisions, facts, ... }
-```
-
----
-
-## 📊 Data Model
+## 📊 Data Models
 
 ### PostgreSQL Schema
 
-```
+```sql
 USERS
 ├── id (UUID, PK)
 ├── email (TEXT, UNIQUE)
@@ -1275,6 +1177,8 @@ CONVERSATIONS
 ├── entities (TEXT[])
 ├── embedding (VECTOR 3072)
 ├── session_status (TEXT: standalone, linked)
+├── has_decisions (BOOLEAN)
+├── has_facts (BOOLEAN)
 └── created_at (TIMESTAMP)
         │
         │ 1:N
@@ -1288,142 +1192,25 @@ CHUNKS
 └── chunk_index (INT)
 ```
 
-### Neo4j Knowledge Graph
+### Neo4j Graph Model
 
 ```
-(User)───CHOSE───→(PostgreSQL)
-   │                    │
-   │                   FOR
-   │                    │
- PREFERS                ▼
-   │              (E-commerce)
-   ▼                    │
-(React)               USES
-   │                    │
- USES                   ▼
-   │               (Stripe)
-   ▼
-(Node.js)
+Node Types:
+├── User          {user_id}
+├── Tool          {name, description}
+├── Technology    {name, description}
+├── Project       {name, description}
+├── Company       {name}
+└── Concept       {name}
 
-Temporal Facts:
-(User)──WORKS_ON──→(Project) [valid_from: 2026-01-17]
-```
-
----
-
-## 🧠 Key Techniques
-
-### 1. Semantic Search
-
-```
-Query: "What database did I choose?"
-          │
-          ▼
-    ┌───────────┐
-    │ Embedding │  text-embedding-3-large
-    │ [0.1,...] │  3072 dimensions
-    └─────┬─────┘
-          │
-          ▼
-┌─────────────────────────────────────────┐
-│           pgvector Search               │
-│                                         │
-│  SELECT content,                        │
-│         1 - (embedding <=> query) as s  │
-│  FROM chunks                            │
-│  WHERE s > 0.5                          │
-│  ORDER BY s DESC                        │
-│  LIMIT 5                                │
-└─────────────────────────────────────────┘
-          │
-          ▼
-Results:
-├── "I will use PostgreSQL..." (0.89)
-└── "PostgreSQL is solid..."   (0.85)
-```
-
-### 2. Session Auto-Detection
-
-```
-New conversation embedding
-          │
-          ▼
-Search existing sessions
-          │
-          ▼
-┌─────────────────────────────────┐
-│ Session              │ Score   │
-├──────────────────────┼─────────┤
-│ E-commerce Project   │ 0.96 ✓  │
-│ React Learning       │ 0.68    │
-│ Personal Blog        │ 0.32    │
-└──────────────────────┴─────────┘
-          │
-          ▼
-Apply confidence rules:
-• 0.96 > 0.85 threshold ✓
-• 0.96 - 0.68 = 0.28 > 0.15 margin ✓
-• Decision: AUTO-LINK
-```
-
-### 3. Recommendation Scoring
-
-```
-Final Score = (Relevance × 0.60) + (Recency × 0.25) + (Quality × 0.15)
-
-┌─────────────────────────────────────────────────────────────────┐
-│ RELEVANCE (60%)                                                 │
-│ • Semantic similarity to query                                  │
-│ • Topic overlap bonus (+0.1 per match)                         │
-├─────────────────────────────────────────────────────────────────┤
-│ RECENCY (25%)                                                   │
-│ • < 24 hours: 1.0                                              │
-│ • 1-30 days: Linear decay                                      │
-│ • > 30 days: 0.0                                               │
-├─────────────────────────────────────────────────────────────────┤
-│ QUALITY (15%)                                                   │
-│ • Has summary: +0.3                                            │
-│ • Has topics: +0.2                                             │
-│ • Has entities: +0.2                                           │
-│ • Messages ≥ 10: +0.3                                          │
-└─────────────────────────────────────────────────────────────────┘
-
-Auto-Selection: Score > 0.85 AND margin > 0.20
-```
-
-### 4. Context Prompt Structure
-
-```
-[CONTEXT FROM PREVIOUS AI CONVERSATIONS - PROVIDED BY SYMMETRY]
-
-## Session: E-commerce Project
-Description: Building online store with React, Node.js, PostgreSQL
-
-## Conversation History (chronological):
-
-### [chatgpt] - 2026-01-17
-**USER**: I want to build an e-commerce site...
-**ASSISTANT**: Great choice! React is excellent...
-
-### [claude] - 2026-01-17
-**USER**: Help with product catalog...
-**ASSISTANT**: For a product catalog...
-
-## Key Decisions Made:
-- Chose PostgreSQL (Reason: relational data needs)
-- Using Prisma as ORM
-- Stripe for payments
-
-## Current Facts:
-- Project USES React
-- Project USES Node.js
-
-## Instructions:
-- Use this context to maintain continuity
-- Don't ask questions already answered
-- Reference past decisions when relevant
-
-[END SYMMETRY CONTEXT]
+Relationship Types:
+├── CHOSE         {confidence, status, reason, verified, temporal}
+├── REJECTED      {confidence, reason}
+├── CONSIDERING   {confidence, attributed_to}
+├── PREFERS       {strength, reason}
+├── USES          {temporal}
+├── WORKS_ON      {valid_from, valid_to}
+└── RELATED_TO    {description}
 ```
 
 ---
@@ -1446,17 +1233,9 @@ Authorization: Bearer sk_your_api_key
 | POST | `/api/v1/users/register` | Register new user |
 
 ```bash
-# Register
 curl -X POST http://localhost:8000/api/v1/users/register \
   -H "Content-Type: application/json" \
   -d '{"email": "user@example.com"}'
-
-# Response
-{
-  "user_id": "...",
-  "api_key": "sk_...",
-  "message": "Store your API key securely"
-}
 ```
 
 #### Ingest
@@ -1489,7 +1268,7 @@ curl -X POST http://localhost:8000/api/v1/ingest \
 # Query mode
 curl -X POST http://localhost:8000/api/v1/retrieve \
   -H "Authorization: Bearer sk_..." \
-  -d '{"mode": "query", "query": "what database?"}'
+  -d '{"mode": "query", "query": "what database did I choose?"}'
 
 # Session mode
 curl -X POST http://localhost:8000/api/v1/retrieve \
@@ -1544,12 +1323,12 @@ NEO4J_PASSWORD=...
 # LLM Provider
 LLM_PROVIDER=azure_openai  # or "openai"
 
-# Azure OpenAI
+# Azure OpenAI - Chat
 AZURE_OPENAI_ENDPOINT=https://...
 AZURE_OPENAI_API_KEY=...
 AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
 
-# Embeddings
+# Azure OpenAI - Embeddings
 AZURE_OPENAI_EMBEDDING_ENDPOINT=https://...
 AZURE_OPENAI_EMBEDDING_API_KEY=...
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
@@ -1557,7 +1336,35 @@ AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
 # Settings
 CHUNK_SIZE=500
 CHUNK_OVERLAP=50
-SIMILARITY_THRESHOLD=0.5
+SIMILARITY_THRESHOLD=0.7
+```
+
+### Configuration Class (`app/config.py`)
+
+```python
+class Settings(BaseSettings):
+    # Database
+    supabase_url: str
+    supabase_key: str
+    database_url: str
+    
+    # Neo4j
+    neo4j_uri: str
+    neo4j_user: str
+    neo4j_password: str
+    
+    # LLM
+    llm_provider: str = "openai"
+    openai_api_key: Optional[str] = None
+    azure_openai_endpoint: Optional[str] = None
+    azure_openai_api_key: Optional[str] = None
+    
+    # App settings
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+    embedding_model: str = "text-embedding-3-large"
+    llm_model: str = "gpt-4o-mini"
+    similarity_threshold: float = 0.7
 ```
 
 ---
@@ -1565,38 +1372,64 @@ SIMILARITY_THRESHOLD=0.5
 ## 📁 Project Structure
 
 ```
-symmetry-mvp/
+symmetry-mvp-v2/
 ├── app/
-│   ├── main.py                 # FastAPI application
-│   ├── config.py               # Configuration
+│   ├── __init__.py
+│   ├── main.py                    # FastAPI application entry point
+│   ├── config.py                  # Configuration management
+│   │
 │   ├── api/
-│   │   ├── dependencies.py     # Auth, DB injection
+│   │   ├── __init__.py
+│   │   ├── dependencies.py        # Dependency injection (auth, DB)
 │   │   └── routes/
-│   │       ├── users.py
-│   │       ├── ingest.py
-│   │       ├── retrieve.py
-│   │       ├── recommend.py
-│   │       ├── sessions.py
-│   │       └── conversations.py
+│   │       ├── __init__.py
+│   │       ├── users.py           # User registration
+│   │       ├── ingest.py          # POST /ingest
+│   │       ├── retrieve.py        # POST /retrieve
+│   │       ├── recommend.py       # POST /recommend
+│   │       ├── sessions.py        # Session CRUD
+│   │       ├── conversations.py   # Conversation management
+│   │       ├── memories.py        # Memory operations
+│   │       └── knowledge.py       # Knowledge graph operations
+│   │
 │   ├── db/
-│   │   ├── postgres.py         # PostgreSQL client
-│   │   └── neo4j.py            # Neo4j client
+│   │   ├── __init__.py
+│   │   ├── postgres.py            # PostgreSQL client (Memory Layer)
+│   │   └── neo4j.py               # Neo4j client (Knowledge Layer)
+│   │
 │   ├── services/
-│   │   ├── session.py          # Session detection
-│   │   ├── recommendation.py   # Scoring algorithm
-│   │   ├── embedding.py        # Vector embeddings
-│   │   ├── extraction.py       # Knowledge extraction
-│   │   ├── chunking.py         # Text chunking
-│   │   └── summarization.py    # Summaries
-│   └── models/
-│       ├── requests.py         # Request schemas
-│       └── responses.py        # Response schemas
+│   │   ├── __init__.py
+│   │   ├── chunking.py            # Semantic text chunking
+│   │   ├── embedding.py           # Vector embedding generation
+│   │   ├── extraction.py          # Knowledge extraction (LLM)
+│   │   ├── session.py             # Session detection & linking
+│   │   ├── recommendation.py      # Recommendation scoring
+│   │   └── summarization.py       # Context summarization
+│   │
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── requests.py            # Pydantic request models
+│   │   └── responses.py           # Pydantic response models
+│   │
+│   └── prompts/
+│       ├── __init__.py
+│       ├── extraction.py          # Knowledge extraction prompts
+│       └── summarization.py       # Summarization prompts
+│
 ├── scripts/
-│   ├── setup_db.sql            # PostgreSQL schema
-│   └── setup_neo4j.cypher      # Neo4j schema
-├── requirements.txt
-├── env.example
-└── README.md
+│   ├── setup_db.sql               # PostgreSQL schema
+│   ├── migrate_db.sql             # Migration scripts
+│   └── setup_neo4j.cypher         # Neo4j schema
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_chunking.py           # Chunking service tests
+│   └── test_verification.py       # Verification tests
+│
+├── requirements.txt               # Python dependencies
+├── env.example                    # Environment template
+├── Dockerfile                     # Container definition
+└── README.md                      # This file
 ```
 
 ---
@@ -1618,6 +1451,25 @@ symmetry-mvp/
 | Retrieve (query) | 1-2 sec |
 | Retrieve (session) | 1-3 sec |
 | Recommend | 2-4 sec |
+
+---
+
+## 🎓 Learning Resources
+
+### Understanding Embeddings
+- [OpenAI Embeddings Guide](https://platform.openai.com/docs/guides/embeddings)
+- Embeddings capture semantic meaning, not just keywords
+- Similar meanings → similar vectors → close in vector space
+
+### Understanding pgvector
+- [pgvector Documentation](https://github.com/pgvector/pgvector)
+- `<=>` operator = cosine distance
+- IVFFlat index for fast approximate nearest neighbor search
+
+### Understanding Neo4j
+- [Neo4j Graph Database](https://neo4j.com/docs/)
+- Nodes = Entities, Edges = Relationships
+- Cypher query language for graph traversal
 
 ---
 
